@@ -47,8 +47,27 @@ python -m flake8 .
 python -m pytest
 ```
 
-The last command should end in `24 passed`. If it does, your environment matches
+The last command should end in `74 passed`. If it does, your environment matches
 the one the pull-request gate uses.
+
+Then train the model, which needs no cloud account and no credentials:
+
+```bash
+python -m automobile.entrypoints.train
+```
+
+It reads `data/auto-mpg.csv`, fits the pipeline, and finishes in a few seconds
+by printing the run it created:
+
+```
+tracking uri:    file:///.../ryvion-mlops/mlruns
+experiment:      automobile-mpg
+run id:          6855a100cc4644dfbfd9d3422f79624f
+model uri:       models:/m-fbaecf2e2b3344e2a9d2202d97446a1d
+```
+
+`mlflow ui` in the same directory will show the run, its parameters, its
+metrics and the logged model.
 
 ## What runs today
 
@@ -62,17 +81,68 @@ above:
 | `automobile-evaluate` | `automobile.entrypoints.evaluate` | Apply the promote-or-reject gate |
 | `automobile-register` | `automobile.entrypoints.register` | Register the promoted model |
 
-Each currently parses its arguments and then raises `NotImplementedError`: this
-slice establishes the toolchain, the packaging, the dependency pins and the CI
-gate, and the steps are filled in by the slices that follow. `--help` works on
-all four, and the test suite holds that surface in place while the bodies
-arrive.
+`train` is implemented. The other three parse their arguments and then raise
+`NotImplementedError`; they are filled in by the slices that follow. `--help`
+works on all four, and the test suite holds that surface in place while the
+bodies arrive.
+
+## The dataset
+
+`data/auto-mpg.csv` is the canonical UCI *Auto MPG* dataset, committed as a seed
+fixture: 398 cars, nine columns, and **six rows whose `horsepower` is `?`
+instead of a number**. Those six are not dirt left behind by accident. They are
+the dataset's real defect, and they are what the data contract will be written
+against and what the model pipeline already survives without help from its
+caller. Do not "clean" them out of the file.
+
+The file is committed rather than downloaded because a classroom that depends on
+an upstream host being reachable at 09:00 is a classroom that occasionally does
+not happen. Later slices register it as a versioned data asset; the committed
+file is the seed, and the asset version is what appears in a model's lineage.
+
+Source: <https://archive.ics.uci.edu/dataset/9/auto+mpg>, file `auto-mpg.data`
+(MD5 `b858f4580d0066c48e260dd3b96f1ed8`), converted to CSV with the header row
+the notebook uses. No value was changed.
+
+## The model artifact
+
+The thing training logs is a **`sklearn.pipeline.Pipeline`**, not a bare
+estimator:
+
+| Stage | Does |
+|---|---|
+| `prep` | Coerces the numeric columns (`?` becomes missing), imputes with the column mean learned at fit time, and drops the free-text `car name` |
+| `scale` | `StandardScaler` - the supported replacement for the `normalize=True` argument scikit-learn removed in 1.2, which is the argument that killed the predecessor |
+| `model` | `LinearRegression` |
+
+Because preprocessing is *inside* the model, its statistics are fitted and
+serialised with it, and whoever calls the model supplies nothing but a raw row.
+That is the training/serving skew the predecessor carried, closed. The model is
+logged with an MLflow signature and an input example, so the artifact declares a
+schema of named columns - and the input example deliberately includes a row
+containing `?`.
+
+## Where a run is recorded
+
+The training code is backend-agnostic by construction: it reads its destination
+from the environment and names no provider.
+
+| Environment variable | Unset | Set |
+|---|---|---|
+| `MLFLOW_TRACKING_URI` | A local file store under `./mlruns`. No account, no credentials, no network. | Whatever it points at. |
+| `MLFLOW_EXPERIMENT_NAME` | `automobile-mpg` | The experiment runs are grouped under. |
+
+Pointing the identical code at a managed backend is therefore a change of
+setting, not a change of code. There is no `if azure:` branch anywhere, and a
+unit test fails the build if any module in the domain package imports a cloud
+SDK.
 
 ## Repository layout
 
 ```
 automobile/            The domain package.
   entrypoints/         One argparse shell per pipeline step. No domain logic.
+data/                  The seed dataset, committed. 398 rows, six of them defective.
 environments/          The three dependency manifests, and the lockfile.
 tests/                 Unit tests. No credentials, no network, no containers.
 .github/workflows/     GitHub Actions: the always-on quality gate.
