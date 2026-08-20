@@ -1,0 +1,31 @@
+# Manifest 3 of 3 - the development and CI environment.
+#
+# Job: everything needed to lint this repository and run its unit tests, on a
+# contributor's laptop and on a pull-request runner. Nothing here ships to the
+# cloud or into the serving image.
+#
+# The scientific libraries below are pinned to the SAME versions as
+# environments/training.conda.yaml on purpose: CI must test the code against
+# the library versions that training will actually use.
+#
+# Every line is an exact pin. This repository's predecessor died because
+# scikit-learn was unpinned and version 1.2 removed a parameter the training
+# code passed - nobody changed the code, the library moved underneath it. A
+# range specifier here is a defect, and tests/test_dependency_pins.py enforces
+# it.
+#
+# Install the resolved environment, not this file:
+#     pip install -r environments/dev.lock.txt
+# This file is the input; dev.lock.txt is the output that gets installed.
+
+# --- shared with the training environment ---
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.7.2
+mlflow==3.4.0
+
+# --- development and CI only ---
+pytest==8.4.2
+pytest-cov==6.2.1
+flake8==7.3.0
+flake8-formatter-junit-xml==0.0.6

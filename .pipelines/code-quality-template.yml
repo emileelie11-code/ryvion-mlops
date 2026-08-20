@@ -1,0 +1,38 @@
+# Pipeline template: lint, unit tests with coverage, and published results.
+#
+# Referenced by pr.yml, and by the CI definition, so the quality gate is defined
+# once and cannot drift between them.
+steps:
+  - task: UsePythonVersion@0
+    displayName: 'Use Python $(pythonVersion)'
+    inputs:
+      versionSpec: '$(pythonVersion)'
+
+  - script: |
+      python -m pip install --upgrade pip
+      python -m pip install -r environments/dev.lock.txt
+      python -m pip install -e . --no-deps
+    displayName: 'Install the locked environment'
+
+  - script: |
+      python -m flake8 --format=junit-xml --output-file=lint-testresults.xml --tee
+    displayName: 'Lint'
+
+  - script: |
+      python -m pytest --cov=automobile --cov-report=xml --junitxml=unit-testresults.xml
+    condition: succeededOrFailed()
+    displayName: 'Unit tests'
+
+  - task: PublishTestResults@2
+    condition: succeededOrFailed()
+    displayName: 'Publish lint and test results'
+    inputs:
+      testResultsFiles: '*-testresults.xml'
+      testRunTitle: 'Linting and unit tests'
+      failTaskOnFailedTests: true
+
+  - task: PublishCodeCoverageResults@2
+    condition: succeededOrFailed()
+    displayName: 'Publish coverage report'
+    inputs:
+      summaryFileLocation: 'coverage.xml'

@@ -1,0 +1,27 @@
+# Manifest 2 of 3 - the serving container.
+#
+# Job: the runtime of the hand-built serving image - the HTTP service that
+# loads the trained model through its MLflow flavour and answers prediction and
+# health requests. It carries no training, testing or cloud tooling.
+#
+# The service deliberately duplicates none of the preprocessing: the model
+# artifact is a complete pipeline and carries its own fitted statistics, so
+# these dependencies exist only to load it and serve it.
+#
+# Every line is an exact pin, for the same reason as in the other two
+# manifests, and additionally because a container image that resolves
+# differently on each build is not a container image anyone can reason about.
+#
+# Used by the serving Dockerfile:
+#     pip install --no-cache-dir -r environments/serving.requirements.txt
+
+# The model is a scikit-learn pipeline loaded through MLflow, so the versions
+# below must match the ones that trained it.
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.7.2
+mlflow==3.4.0
+
+# The HTTP surface.
+fastapi==0.128.0
+uvicorn==0.38.0

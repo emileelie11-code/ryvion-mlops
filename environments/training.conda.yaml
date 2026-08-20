@@ -1,0 +1,32 @@
+# Manifest 1 of 3 - the Azure ML training environment.
+#
+# Job: the environment the four pipeline steps (validate, train, evaluate,
+# register) run inside on cloud compute. It is referenced by the `az ml`
+# environment definition and therefore by every job in the pipeline.
+#
+# Conda rather than a plain requirements file, because this is the format the
+# platform's environment definition consumes and because it is where the Python
+# version itself is pinned.
+#
+# Every dependency is pinned to an exact version. The predecessor of this
+# repository pinned nothing here, and a scikit-learn release that removed a
+# constructor parameter took the training step down without a single line of
+# code changing. The versions below match environments/dev.requirements.txt so
+# that what CI tests is what the cloud runs.
+name: automobile-training
+channels:
+  - conda-forge
+dependencies:
+  # Python 3.11: the widest overlap between the platform's curated images, the
+  # cloud SDK and the tracking library. Boring and universal beats current.
+  - python=3.11.9
+  - pip=25.2
+  - pip:
+      - numpy==2.2.6
+      - pandas==2.3.3
+      - scikit-learn==1.7.2
+      - mlflow==3.4.0
+      # Points MLflow's tracking URI at the workspace. The training code stays
+      # backend-agnostic; this package is what makes the managed backend one of
+      # the destinations it can be pointed at.
+      - azureml-mlflow==1.62.0

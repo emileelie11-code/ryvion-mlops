@@ -1,0 +1,31 @@
+# Azure Pipelines - the pull-request gate.
+#
+# This is the definition the course studies: the same lint and unit-test
+# commands the GitHub Actions workflow runs, expressed in the CI platform the
+# module teaches, running in a separate organisation connected to the student's
+# own fork. That separation between code host and CI platform is realistic, and
+# it is what makes branch-versus-pull-request trigger behaviour demonstrable.
+#
+# The code-quality template below is INCLUDED. In this repository's predecessor
+# it was commented out, so neither the linter nor the single unit test ever ran
+# once in five years. That is the defect this file exists to not repeat.
+#
+# The pull-request gate needs no credentials, no variable group and no service
+# connection: it only lints and tests. Anything needing a workspace belongs in
+# the CI/CD definitions, not here.
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  pythonVersion: '3.11'
+
+steps:
+  - template: code-quality-template.yml

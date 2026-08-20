@@ -1,0 +1,35 @@
+# Packaging and tooling configuration for the `automobile` domain package.
+#
+# Note what is NOT here: a dependency list. Runtime dependencies live in the
+# three manifests under environments/, each with one documented job, and adding
+# a `dependencies` array here would quietly create a fourth. `pip install -e .`
+# installs this package and its console scripts; the environment it runs in
+# comes from a manifest.
+
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automobile"
+version = "0.1.0"
+description = "Domain code for the ryvion-mlops teaching repository."
+readme = "README.md"
+# Python 3.11 exactly: the widest overlap between Azure ML's curated images,
+# azure-ai-ml and MLflow. Declared as a hard constraint so that installing on a
+# newer interpreter fails at install time rather than at training time.
+requires-python = "==3.11.*"
+dependencies = []
+
+[project.scripts]
+automobile-validate = "automobile.entrypoints.validate:main"
+automobile-train = "automobile.entrypoints.train:main"
+automobile-evaluate = "automobile.entrypoints.evaluate:main"
+automobile-register = "automobile.entrypoints.register:main"
+
+[tool.setuptools.packages.find]
+include = ["automobile*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
