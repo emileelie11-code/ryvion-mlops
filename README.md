@@ -98,6 +98,14 @@ python -m automobile.entrypoints.evaluate --run-id RUN_ID
 python -m automobile.entrypoints.register --run-id RUN_ID
 ```
 
+That `export` is **per process.** It does not follow you into a second terminal,
+a scheduled task or an IDE run configuration, and a shell without it does not
+fail: MLflow falls back to a local file store, which has a registry of its own
+and is empty. So `evaluate` and `register` say out loud which destination they
+consulted and how many registered models were in it - see [The quality
+gate](#the-quality-gate) - because a promotion against an empty store is a
+promotion against nothing at all.
+
 Both gates report themselves the same way: `validate` exits non-zero when the
 data breaks its contract, and `evaluate` exits **0** when it promotes the
 candidate and **1** when it rejects it, so a run stops before it reaches
@@ -203,7 +211,9 @@ without a workspace.
 Three behaviours are worth knowing before you change the threshold:
 
 - **No incumbent promotes.** The first model ever trained has nothing to beat.
-  A gate that refused it would deadlock the pipeline on its first run.
+  A gate that refused it would deadlock the pipeline on its first run. It is
+  also the one verdict worth reading twice, so the step tells you where it
+  looked - see below.
 - **The boundary is inclusive.** A candidate landing exactly on the required
   value is promoted, so `--min-improvement` reads as "at least this much
   better".
@@ -223,6 +233,40 @@ the gate has never seen. An exit code is only as good as the thing reading it,
 and `register` is also a command a person can type.
 
 There is no override flag. A gate with a bypass is not a gate.
+
+### "No incumbent" is two different things
+
+Finding nothing in the registry means either *this project has never trained a
+model* or *this is not the registry you meant*. Both promote, and both should -
+but only one of them is a comparison you can trust, and the verdict is identical
+in each. So `evaluate` and `register` name the destination they consulted and
+count what is registered there:
+
+```
+tracking store:  sqlite:///mlflow.db  (MLFLOW_TRACKING_URI is set)
+store contains:  1 registered model(s): automobile-mpg
+incumbent:       none registered under 'automobile-mpg-v2'
+decision:        promote (no-incumbent)
+```
+
+```
+tracking store:  file:///C:/Users/you/scratch/mlruns  (MLFLOW_TRACKING_URI is unset, so this is MLflow's default store)
+store contains:  0 registered models - this store has never held one
+incumbent:       none registered under 'automobile-mpg'
+decision:        promote (no-incumbent)
+```
+
+The second is the one that bites, and it costs nothing to fall into:
+`MLFLOW_TRACKING_URI` is read **per process**, so a second terminal never
+inherits the `export` you made in the first, quietly reads an empty file store,
+and gets a green promotion for a model nothing was compared against. Both cases
+also print a loud `*** NOTHING WAS COMPARED ***` banner, because a first-ever
+promotion is not an ordinary one. `register` does the same on its side: it
+reports the store and what it held, and marks a version `1` as the first thing
+ever registered there.
+
+None of this branches on which backend the destination happens to be. It reports
+the URI MLflow resolved, whatever that turns out to be.
 
 This replaces the predecessor's parent-run cancellation, and the semantics
 differ deliberately: **a rejected run now reports as failed, not cancelled.**
@@ -255,10 +299,17 @@ same variable at a database instead:
 export MLFLOW_TRACKING_URI=sqlite:///mlflow.db
 ```
 
-That is one file in your working directory, created on first use, ignored by
-git, and still no account and no network. It is the **only** difference between
-running the gate locally and running it against the managed workspace, where the
-same variable points at the workspace instead. The destination stays
+Note both halves of that: it is one file **in your working directory**, and the
+variable is read **per process**. A different directory, or a shell that never
+ran the export, is a different registry - an empty one, created on the spot,
+that answers "nothing registered" perfectly truthfully. That is why the gate
+prints the destination it used; see ["No incumbent" is two different
+things](#no-incumbent-is-two-different-things).
+
+The file is created on first use, ignored by git, and still no account and no
+network. It is the **only** difference between running the gate locally and
+running it against the managed workspace, where the same variable points at the
+workspace instead. The destination stays
 configuration - nothing in this repository branches on it, and nothing
 hard-codes it.
 

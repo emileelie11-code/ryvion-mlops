@@ -366,14 +366,21 @@ test metrics:    {'mse': <span class="g">8.195643426571698</span>, 'rmse': 2.862
 <pre class="cmd">python -m automobile.entrypoints.evaluate --run-id &lt;YOUR_RUN_ID&gt;
 python -m automobile.entrypoints.register --run-id &lt;YOUR_RUN_ID&gt;</pre>
         <p class="lbl">Expected</p>
-<pre class="out">incumbent:       none registered yet
+<pre class="out">tracking store:  sqlite:///mlflow.db  (MLFLOW_TRACKING_URI is set)
+store contains:  0 registered models - this store has never held one
+incumbent:       none registered under 'automobile-mpg'
 policy:          test_mse minimise, margin 0.0
 decision:        <span class="g">promote (no-incumbent)</span>
+
+<span class="g">*** NOTHING WAS COMPARED ***</span> This candidate was promoted without being
+measured against anything, and becomes the baseline every later candidate
+is measured against.
 
 Successfully registered model 'automobile-mpg'.
 Created version '1' of model 'automobile-mpg'.
 new version:      <span class="g">1</span></pre>
         <div class="ck"><b>Checkpoint</b><span>Both <span class="chip ok">exit 0</span>, and version <code>1</code> exists. Browse it with <code>mlflow ui --backend-store-uri sqlite:///mlflow.db</code>.</span></div>
+        <p><strong>Read those first two lines every time.</strong> <code>MLFLOW_TRACKING_URI</code> is read <em>per process</em>: it does not follow you into a second terminal, a scheduled task, or an IDE run configuration. A shell that never got the export still finds a store — an empty one it creates on the spot — and the gate will honestly report <code>promote (no-incumbent)</code> against it, because there was genuinely nothing there to beat. The destination and the count of what it holds are what tell that apart from a real first run; the verdict on its own cannot.</p>
       </div>
     </div>
   </section>
@@ -519,6 +526,7 @@ Remove-Item -Recurse serving\model, mlruns</pre>
       <li><strong>“No module named numpy”</strong> — you are running the system Python, not the virtualenv. Re-activate it, or call <code>.venv\Scripts\python.exe</code> directly.</li>
       <li><strong>“No module named pandera”</strong> — your virtualenv predates the data-contract slice. Re-run <code>pip install -r environments/dev.lock.txt</code>. This failing loudly is the lockfile working.</li>
       <li><strong>Registry errors mentioning a file store</strong> — <code>MLFLOW_TRACKING_URI</code> is unset in this shell. It does not persist across terminals.</li>
+      <li><strong><code>promote (no-incumbent)</code> when you expected a comparison</strong> — same cause, quieter symptom: the setting is per process, so a second shell reads a different, empty store and there is nothing to beat in it. The step prints <code>tracking store:</code> and <code>store contains:</code> for exactly this; if the destination is not the <code>sqlite:///mlflow.db</code> you set in step 4, or the count is <code>0</code> when you know you registered a version, re-export it in this shell and evaluate again.</li>
       <li><strong><code>curl</code> rejects <code>-X</code> or <code>-d</code></strong> — PowerShell's alias. Use <code>curl.exe</code>.</li>
       <li><strong>Port 8000 already in use</strong> — <code>docker rm -f ryvion</code>, or map a different port with <code>-p 8001:8000</code>.</li>
       <li><strong><code>readyz</code> returns 503</strong> — the container is up but no model loaded. You most likely skipped step 10, or built before exporting the model.</li>

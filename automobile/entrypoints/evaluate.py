@@ -22,18 +22,33 @@ The registry this step reads the incumbent from needs a database behind it, so
 locally the tracking destination is a SQLite file rather than the ``./mlruns``
 directory the train step is happy with. That is one environment variable, and
 the README spells it out.
+
+Which is exactly why this step reports the destination it consulted and how many
+registered models it found there, every time. "No incumbent" is true both of a
+project's genuine first model and of a store nobody meant to read, and only the
+first of those deserves a promotion. Both still promote - refusing the first run
+would deadlock a new project - but the log has to let a reader tell which one
+they are looking at without running a second command.
 """
 
 import argparse
 import sys
+import textwrap
 
-from automobile.quality_gate import DEFAULT_POLICY, Goal, ThresholdPolicy, decide
+from automobile.quality_gate import DEFAULT_POLICY, Goal, Reason, ThresholdPolicy, decide
 from automobile.tracking import (
     DEFAULT_REGISTERED_MODEL_NAME,
     find_incumbent,
     record_gate_decision,
     run_metrics,
+    survey_registry,
 )
+
+
+#: A first-ever promotion is not an ordinary one, and must not read like one: no
+#: comparison happened at all. The marker is loud on purpose - the whole trap
+#: this step used to set was a reassuring green line in a scrollback.
+NOTHING_COMPARED = "*** NOTHING WAS COMPARED ***"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     candidate = run_metrics(args.run_id)
+    survey = survey_registry()
     incumbent = find_incumbent(args.model_name)
     decision = decide(candidate, incumbent.metrics if incumbent else None, policy)
     verdict = record_gate_decision(
@@ -104,13 +120,24 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"candidate run:   {args.run_id}")
     print(f"registered as:   {args.model_name}")
+    print(f"tracking store:  {survey.destination()}")
+    print(f"store contains:  {survey.contents()}")
     if incumbent is None:
-        print("incumbent:       none registered yet")
+        print(f"incumbent:       none registered under {args.model_name!r}")
     else:
         print(f"incumbent:       version {incumbent.version} (run {incumbent.run_id})")
     print(f"policy:          {policy.metric} {policy.goal}, margin {policy.min_improvement}")
     print(f"decision:        {verdict} ({decision.reason})")
     print(f"why:             {decision.summary()}")
+
+    if decision.reason is Reason.NO_INCUMBENT:
+        print()
+        print(f"{NOTHING_COMPARED} This candidate was promoted without being")
+        print("measured against anything, and becomes the baseline every later candidate")
+        print("is measured against.")
+        caution = survey.caution(args.model_name)
+        if caution:
+            print(textwrap.fill(caution, width=88, initial_indent="  ", subsequent_indent="  "))
 
     return 0 if decision.promote else 1
 

@@ -19,10 +19,19 @@ Registration needs a registry, and a registry needs a database behind it rather
 than the ``./mlruns`` directory that is enough for recording runs. Locally that
 is ``MLFLOW_TRACKING_URI=sqlite:///mlflow.db`` - configuration, not code, and no
 account. The README spells it out.
+
+Which store, though, is a question this step answers out loud rather than
+assumes. Registering into a throwaway store looks exactly like registering into
+the project's own: a version number comes back either way. So the destination
+consulted and what it already held are printed on every path, including the
+refusal - a run that "was never evaluated" is just as often a run that was
+evaluated somewhere else - and a version 1 says so loudly instead of blending in
+with version 4.
 """
 
 import argparse
 import sys
+import textwrap
 
 import mlflow
 
@@ -34,7 +43,13 @@ from automobile.tracking import (
     read_gate_decision,
     run_metrics,
     run_params,
+    survey_registry,
 )
+
+#: The register step's equivalent of the evaluate step's loud first-ever marker.
+#: A version 1 in the wrong store reads exactly like a version 1 in the right
+#: one, and only the count of what was already there tells them apart.
+FIRST_VERSION_HERE = "*** FIRST VERSION IN THIS STORE ***"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,12 +105,16 @@ def main(argv: list[str] | None = None) -> int:
     """Parse arguments and run the register step."""
     args = build_parser().parse_args(argv)
 
+    survey = survey_registry()
+
     verdict = read_gate_decision(args.run_id)
     if verdict != PROMOTED:
         missing = "the evaluate step has not run against it" if verdict is None else verdict
         print(
             f"refusing to register run {args.run_id}: {GATE_DECISION_TAG} is {missing}. "
-            "Only a candidate the quality gate promoted is registered.",
+            "Only a candidate the quality gate promoted is registered.\n"
+            f"tracking store consulted: {survey.destination()}\n"
+            "A run evaluated against a different store carries no verdict in this one.",
             file=sys.stderr,
         )
         return 1
@@ -107,7 +126,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"new version:      {version.version}")
     print(f"from run:         {args.run_id}")
     print(f"model uri:        {model_uri}")
+    print(f"tracking store:   {survey.destination()}")
+    print(f"store held:       {survey.contents()} (before this registration)")
     print(f"metrics:          {run_metrics(args.run_id)}")
+
+    if str(version.version) == "1":
+        print()
+        print(f"{FIRST_VERSION_HERE} Nothing was registered under")
+        print(f"{args.model_name!r} at that destination until now.")
+        caution = survey.caution(args.model_name)
+        if caution:
+            print(textwrap.fill(caution, width=88, initial_indent="  ", subsequent_indent="  "))
     return 0
 
 
