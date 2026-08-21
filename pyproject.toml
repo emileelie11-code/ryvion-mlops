@@ -32,4 +32,13 @@ include = ["automobile*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# The default run is the fast one: the pure modules and the command-line
+# skeleton, in seconds, which is what makes it something a developer runs before
+# every commit. The integration test that drives the four steps as subprocesses
+# against a temporary tracking store trains three real models, so it is
+# deselected here and selected explicitly - `python -m pytest -m integration` -
+# by the person or the CI job that wants it. Both are run in CI.
+addopts = "-ra -m 'not integration'"
+markers = [
+    "integration: drives the pipeline steps as real subprocesses against a temporary tracking store; slow, and excluded from the default run",
+]

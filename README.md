@@ -55,8 +55,20 @@ python -m flake8 .
 python -m pytest
 ```
 
-The last command should end in `172 passed`. If it does, your environment matches
-the one the pull-request gate uses.
+The last command should end in `173 passed, 7 deselected`. If it does, your
+environment matches the one the pull-request gate uses.
+
+The seven deselected are the integration test, which drives all four pipeline
+steps as real subprocesses and takes tens of seconds rather than milliseconds.
+It is kept out of the default run so that the run you type before every commit
+stays fast, and CI runs it as a step of its own. To run it here:
+
+```bash
+python -m pytest -m integration
+```
+
+It needs no credentials and no network either - see [Proving the refusals, on
+your own machine](#proving-the-refusals-on-your-own-machine).
 
 Then train the model, which needs no cloud account and no credentials:
 
@@ -416,6 +428,27 @@ interesting half is otherwise unreachable in CI. Set, it runs
 train → evaluate → register once on the same data to put a version 1 in the
 registry, and *then* trains the candidate the gate has to judge. A margin of 5
 mean-squared-error is one no rerun of the same data can clear.
+
+### Proving the refusals, on your own machine
+
+A workflow you have to remember to trigger is a demonstration, not a guarantee.
+`tests/test_pipeline_refusals.py` is the same two refusals as a test:
+
+```bash
+python -m pytest -m integration
+```
+
+It drives validate → train → evaluate → register as four real subprocesses,
+stopping at the first non-zero exit exactly as a pipeline runner does, against a
+throwaway SQLite store in a temporary directory - so it needs no credentials, no
+network, and it cannot register anything into your own `mlflow.db`. It asserts
+that corrupt data leaves the store empty because training never started, and
+that a candidate the gate rejects leaves the registry holding exactly the
+versions it held before - including when `register` is typed by hand afterwards,
+which is the case the pipeline's job ordering cannot cover.
+
+It asserts on exit codes and on the registry, never on the wording of a log
+line, so improving a message does not break it.
 
 ### What the pull request shows
 
@@ -952,7 +985,8 @@ k8s/                   Plain Kubernetes manifests, and the probe/autoscaling lab
 data/                  The seed dataset, committed. 398 rows, six of them defective,
                        plus a deliberately corrupt copy for the contract to refuse.
 environments/          The three dependency manifests, and the lockfile.
-tests/                 Unit tests. No credentials, no network, no containers.
+tests/                 Unit tests, plus one integration test of the refusal paths
+                       behind `-m integration`. No credentials, no network.
 .github/workflows/     GitHub Actions: the always-on quality gate, and the pipeline.
 .github/actions/       One local composite action: Python and the locked environment.
 .pipelines/            Azure Pipelines: the definitions the course studies.
@@ -990,7 +1024,8 @@ lockfile with the command in its header, and commit both.
 ## Continuous integration - two systems, on purpose
 
 - **`.github/workflows/ci.yml`** is the always-on gate on the *code*. It runs
-  lint and unit tests on every pull request and needs no setup at all: fork the
+  lint, the unit tests, and then the integration test that defends the pipeline's
+  refusal paths, on every pull request, and needs no setup at all: fork the
   repository, open a pull request, and it runs. This is what gives coursework
   instant feedback.
 - **`.github/workflows/pipeline.yml`** is the gate on the *model*: the four

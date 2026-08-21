@@ -52,6 +52,19 @@ jobs:
       - name: Unit tests
         run: python -m pytest --cov=automobile --cov-report=xml --junitxml=unit-testresults.xml
 
+      - name: Integration test - the pipeline's refusal paths
+        # Its own step because it is its own kind of test. `-m 'not integration'`
+        # in pyproject.toml keeps it out of the run above, which is the one a
+        # developer types before every commit and which has to stay in seconds;
+        # this one drives the four steps as real subprocesses against a
+        # temporary SQLite tracking store and trains three models.
+        #
+        # pipeline.yml already demonstrates both refusals, but only when someone
+        # presses "Run workflow" with the right inputs. This asserts them on
+        # every pull request, and on a laptop. Still no credentials and no
+        # network: the store is a file in a temporary directory.
+        run: python -m pytest -m integration --junitxml=integration-testresults.xml
+
       - name: Publish test results
         if: always()
         uses: actions/upload-artifact@v7
@@ -59,5 +72,6 @@ jobs:
           name: unit-test-results
           path: |
             unit-testresults.xml
+            integration-testresults.xml
             coverage.xml
           if-no-files-found: warn
