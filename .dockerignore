@@ -1,0 +1,69 @@
+# What the container engine may not send to the daemon when building
+# serving/Dockerfile from the repository root.
+#
+# The build context is the whole repository, but the serving image needs
+# startlingly little of it: two Python modules, one requirements manifest, and
+# the exported model. Everything else is excluded, which keeps the context small
+# and - more to the point - keeps a local .venv, a tracking store or a stray
+# credential file from ever being copied into a layer by accident.
+#
+# Note what is *not* here: serving/model/. That directory is the model the image
+# serves, and excluding it would produce an image that builds and then fails to
+# start.
+
+# Version control and repository metadata.
+.git
+.gitignore
+.github
+.gitattributes
+
+# Local environments and caches. A virtual environment built on the host would
+# be both enormous and wrong for the image's architecture.
+.venv
+venv
+env
+ENV
+.env
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+build
+dist
+
+# The local MLflow tracking store. The model reaches the image as an exported
+# directory, never as a whole run history.
+mlruns
+mlartifacts
+
+# Everything the serving image has no use for. Note that automobile/ is *not*
+# excluded: the pickled model refers to a function in it by name, so the module
+# has to be importable inside the image for the artifact to unpickle at all.
+tests
+notebooks
+data
+docs
+charts
+.pipelines
+.claude
+.flake8
+pyproject.toml
+README.md
+CLAUDE.md
+*.md
+
+# Coverage and test reports.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+*-testresults.xml
+
+# Editor and OS noise.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints

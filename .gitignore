@@ -28,6 +28,11 @@ htmlcov/
 mlruns/
 mlartifacts/
 
+# The model exported for the serving image to bake in. It is a build input
+# produced by a local training run, not something committed: the seed dataset
+# and the training code are what this repository versions.
+serving/model/
+
 # Editors and OS noise
 .vscode/
 .idea/

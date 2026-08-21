@@ -22,8 +22,9 @@ one is not.
   overlap between Azure ML's curated images, `azure-ai-ml` and MLflow.
 - `git`.
 
-Nothing else. Everything in this slice runs on a laptop with no cloud account,
-no credentials and no container engine.
+Nothing else to train the model: it runs on a laptop with no cloud account and
+no credentials. A **container engine** is needed for one section only - building
+and running the serving image - and that section still needs no cloud account.
 
 ## Quickstart - from a fresh clone to a green test run
 
@@ -182,11 +183,129 @@ setting, not a change of code. There is no `if azure:` branch anywhere, and a
 unit test fails the build if any module in the domain package imports a cloud
 SDK.
 
+## The serving container
+
+There are two deployment paths in this repository and the contrast between them
+is the lesson. This is the first one: an image you build yourself, from a
+Dockerfile short enough to read in one sitting. Later, the platform builds an
+equivalent image from the model registry and you get to judge the trade. This
+half needs a container engine and nothing else - no cloud account, no
+credentials, no registry login - so the whole container-and-Kubernetes portion
+of the course runs on a laptop.
+
+### Build it and run it
+
+```bash
+# 1. Train. Note the model uri it prints on the last-but-two line.
+python -m automobile.entrypoints.train
+
+# 2. Export that model next to the Dockerfile. It is a build input rather than
+#    something committed: this repository versions the code and the seed data,
+#    and serving/model/ is gitignored.
+mlflow artifacts download --artifact-uri models:/<the model id> --dst-path serving/model
+
+# 3. Build, from the repository root - not from serving/. The Dockerfile needs
+#    the requirements manifest and the domain package, which live above it.
+docker build -f serving/Dockerfile -t ryvion-mlops-serving:local .
+
+# 4. Run it.
+docker run --rm -p 8000:8000 ryvion-mlops-serving:local
+```
+
+To run the same service without a container - which is how you debug it - export
+the model as above and start it from the repository root:
+
+```bash
+python -m pip install -r environments/serving.requirements.txt
+uvicorn serving.app:app --port 8000
+```
+
+Either way, `MODEL_URI` overrides where the model is loaded from. Unset, it is
+the `model/` directory beside `serving/app.py`, which is exactly where the image
+puts it and where step 2 above puts it in a clone.
+
+### The endpoints
+
+| Endpoint | Answers |
+|---|---|
+| `POST /predict` | One prediction per record. Records carry the column names the data has, raw. |
+| `GET /healthz` | Liveness - the process is up. Point a Kubernetes `livenessProbe` here. |
+| `GET /readyz` | Readiness - a model is loaded. Point a `readinessProbe` here; 503 until it is. |
+| `GET /schema` | The input contract, read off the artifact rather than written down anywhere. |
+| `GET /docs` | The generated API page, if you would rather click than curl. |
+
+The two health endpoints are separate on purpose. A liveness probe that fails
+because a model is missing asks the orchestrator to restart a container that
+will fail in exactly the same way one second later; a readiness probe that fails
+asks it to keep traffic away, which is the correct response and the one that
+leaves a running container to ask questions of.
+
+```bash
+curl -s localhost:8000/healthz
+# {"status":"ok"}
+
+curl -s -X POST localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"records":[{"cylinders":8,"displacement":307.0,"horsepower":"130.0",
+       "weight":3504,"acceleration":12.0,"model year":70,"origin":1,
+       "car name":"chevrolet chevelle malibu"}]}'
+# {"predictions":[14.975242297915628]}
+```
+
+Send `"horsepower": "?"` and you still get a prediction. That is the point of
+the whole design: the sentinel is handled by the imputer *inside* the model,
+with the mean it learned at training time, and this service does not know that
+imputation is a thing that exists.
+
+### Wrong input fails; it does not guess
+
+```bash
+# weight left out
+{"detail":"record 0 is missing required column 'weight'. The model declares
+ columns 'cylinders', 'displacement', ...; see GET /schema."}    # HTTP 422
+```
+
+This matters more than it looks. The model imputes missing values, so a request
+that quietly omits `weight` would *not* error - it would be filled in with a
+training-set mean and scored as though it were complete. A wrong prediction
+returned with a 200 is the worst thing this service could do, so a record that
+does not match the model's declared contract is refused before the model sees
+it, and the reply names the column.
+
+Two gates do that work, and neither is written out by hand. First the service
+checks each record against the column names in the artifact's signature. Then
+MLflow's own schema enforcement refuses types it cannot safely convert. Because
+both are read from the model, they keep working when the signature changes.
+
+### What is in the image, and what is not
+
+- **Multi-stage.** The virtual environment is built in the first stage and
+  copied into the second; the pip cache and the wheel downloads stay behind.
+- **Non-root**, as uid/gid `10001`, written numerically because Kubernetes
+  cannot resolve a user *name* against an image and a manifest that sets
+  `runAsNonRoot` would refuse to start otherwise.
+- **Pinned**, to `environments/serving.requirements.txt` and to a patch release
+  of the base image. `--only-binary=:all:` fails the build rather than compiling
+  anything from source, which is what keeps the image buildable on both x86 and
+  Apple Silicon without a toolchain inside it.
+- **No preprocessing.** The service loads a complete scikit-learn pipeline
+  through its MLflow flavour and hands it a raw row. If you ever find a
+  `to_numeric` or a `fillna` in `serving/`, the skew this repository exists to
+  close has crept back in.
+- **The `automobile` package**, which is there for one specific reason: the
+  pipeline's first stage wraps a function from `automobile.model_factory`, and
+  cloudpickle stores that function as a *reference*. Without the module on the
+  path the artifact does not unpickle at all. The serving dependency manifest
+  still carries no training, testing or cloud package.
+- **`.dockerignore`** keeps the rest of the repository - your `.venv`, your
+  `mlruns/`, the tests, the notebook - out of the build context entirely.
+
 ## Repository layout
 
 ```
 automobile/            The domain package.
   entrypoints/         One argparse shell per pipeline step. No domain logic.
+serving/               The hand-built serving application and its Dockerfile.
 data/                  The seed dataset, committed. 398 rows, six of them defective.
 environments/          The three dependency manifests, and the lockfile.
 tests/                 Unit tests. No credentials, no network, no containers.
