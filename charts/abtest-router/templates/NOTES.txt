@@ -1,0 +1,34 @@
+abtest-router is up in namespace {{ .Values.namespace }}, strategy: {{ .Values.strategy }}.
+
+Routing table (only these versions may answer a caller):
+{{ include "abtest-router.routes" . }}
+{{ if eq .Values.strategy "shadow" }}
+Mirrored, recorded, never served:
+{{ include "abtest-router.mirror" . }}
+{{ end }}
+Call it on the port kind publishes:
+
+  curl -s localhost:{{ .Values.gateway.nodePort }}/_router/status
+  curl -si localhost:{{ .Values.gateway.nodePort }}/predict \
+    -H 'Content-Type: application/json' \
+    -d '{"records":[{"cylinders":8,"displacement":307.0,"horsepower":"130.0",
+         "weight":3504,"acceleration":12.0,"model year":70,"origin":1,
+         "car name":"chevrolet chevelle malibu"}]}'
+
+Every response carries X-Model-Version, so counting which version answered needs
+nothing but curl.
+
+Change strategy without touching either model:
+
+  helm upgrade {{ .Release.Name }} charts/abtest-router -n {{ .Values.namespace }} \
+    --set strategy=canary --set canary.weight=25
+
+Roll back the last change - a real release rollback, not a second forward change:
+
+  helm history {{ .Release.Name }} -n {{ .Values.namespace }}
+  helm rollback {{ .Release.Name }} <revision> -n {{ .Values.namespace }}
+{{ if eq .Values.strategy "shadow" }}
+What the shadow recorded, and what the caller got instead:
+
+  curl -s localhost:{{ .Values.gateway.nodePort }}/_router/shadow
+{{ end }}

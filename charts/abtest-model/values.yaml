@@ -1,13 +1,96 @@
+# One model version, deployed. Install this chart twice - once per colour - and
+# the three deployment strategies are all expressible on top of the two releases
+# it leaves behind.
+#
+#   helm install model-blue  charts/abtest-model -n abtesting --create-namespace \
+#     --set deployment.name=model-blue --set deployment.bluegreen=blue \
+#     --set deployment.image.name=ryvion-mlops-serving:blue
+#
+#   helm install model-green charts/abtest-model -n abtesting \
+#     --set deployment.name=model-green --set deployment.bluegreen=green \
+#     --set deployment.image.name=ryvion-mlops-serving:green
+#
+# What was repaired here, and why each one mattered:
+#
+#   * `deployment.image.name` did not exist. The template read it, so `helm
+#     install` failed on the first attempt with `nil pointer evaluating
+#     interface {}.name`. A chart that has never been installed is easy to
+#     mistake for a chart that works.
+#   * The ports were 5001 for traffic and 8086 for probes. The serving container
+#     listens on 8000 and has no second port at all, so the Service pointed at a
+#     port nothing was bound to and the probe port was fiction.
+#   * There were no probes, so `model_version` labels switched traffic to pods
+#     that had not finished loading their model - which is precisely the failure
+#     a blue-green cutover exists to avoid.
+#   * There were no resource requests, so nothing could be scheduled predictably
+#     and no autoscaler could ever have observed these pods.
+
+# The namespace every object in this chart is created in. It must match the
+# `--namespace` Helm is invoked with; they are two statements of the same thing
+# and Helm refuses an install where they disagree.
 namespace: abtesting
+
+# The `app` label both colours share. It is what makes them one application with
+# two versions rather than two applications, and it is the label a Service
+# selects on when it wants "either colour".
 appname: model
 
 deployment:
-  name: model-green  
+  # Names the Deployment. One per colour, so the two do not collide.
+  name: model-green
+
+  # The colour. This is the value everything else keys off: the `model_version`
+  # label on the pods, the Service that fronts them, and the destination a
+  # router or a VirtualService names. Blue-green is nothing more than changing
+  # which of these two values the live route points at.
   bluegreen: green
+
+  replicas: 1
+
+  image:
+    # Two images, one Dockerfile, two exported models. See the README: the model
+    # is a build input, so a version of the model is a version of the image.
+    name: ryvion-mlops-serving:green
+
+    # IfNotPresent, not Always. There is no registry in this story - the images
+    # were built on the laptop and pushed into the cluster with `kind load
+    # docker-image`. `Always` sends the kubelet to Docker Hub for an image that
+    # has never been there, and the pod sits in ImagePullBackOff.
+    pullPolicy: IfNotPresent
+
   container:
-    name: model  
-    port: 5001
+    name: model
+
+    # The port the serving container actually listens on. It was 5001 here for
+    # five years, matched nothing, and was never noticed because nothing was
+    # ever deployed.
+    port: 8000
+
+  # The two endpoints the serving container exposes for this, and they are not
+  # interchangeable: /healthz says the process is up (failing it restarts the
+  # container) and /readyz says a model is loaded (failing it removes the pod
+  # from its Service without restarting anything). k8s/deployment.yaml explains
+  # the pairing at length.
+  probes:
+    liveness: /healthz
+    readiness: /readyz
+    # Loading an MLflow model is slow. The startup probe suspends liveness until
+    # the process first answers, so "still starting" and "wedged" stop being the
+    # same signal.
+    startupSeconds: 90
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 svc:
+  # The Service is named `<svc.name>-<deployment.bluegreen>`, so installing this
+  # chart twice leaves `model-svc-blue` and `model-svc-green` behind. Those two
+  # names are the addresses every routing strategy in charts/abtest-router and
+  # charts/abtest-istio resolves.
   name: model-svc
-  port: 5001
+  port: 8000

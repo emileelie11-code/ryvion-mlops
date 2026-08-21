@@ -1,0 +1,14 @@
+apiVersion: v2
+name: abtest-router
+description: >-
+  The traffic layer for blue-green, canary and shadow deployment of the two model
+  versions charts/abtest-model installs - without a service mesh.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mlops
+  - blue-green
+  - canary
+  - shadow
+  - traffic-mirroring

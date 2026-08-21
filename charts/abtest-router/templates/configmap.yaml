@@ -1,0 +1,18 @@
+# The router's source, mounted into a stock Python image.
+#
+# A ConfigMap rather than an image because the whole point of this chart is that
+# it costs nothing to run and nothing to rebuild: `helm upgrade` changes the
+# routing and restarts one 20 MB pod. The file is a real file in the chart
+# (files/router.py), so flake8 lints it on every pull request like any other
+# module in this repository - which a script pasted into a YAML string literal
+# would not be.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.router.name }}-code
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.router.name }}
+data:
+  router.py: |
+{{ .Files.Get "files/router.py" | indent 4 }}

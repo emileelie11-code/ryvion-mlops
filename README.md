@@ -592,8 +592,9 @@ they are written down: a Deployment, a Service, three probes, resource requests
 and limits, and a HorizontalPodAutoscaler.
 
 Nothing in `k8s/` is generated and nothing in it is a chart. The Helm material
-in `charts/` is a separate exercise; this is the plain-YAML layer underneath it,
-which is the layer worth being able to read.
+in `charts/` is a separate exercise - see [Deployment strategies](#deployment-strategies-blue-green-canary-and-shadow) -
+and this is the plain-YAML layer underneath it, which is the layer worth being
+able to read.
 
 ```
 k8s/
@@ -975,6 +976,522 @@ Grafana onto this same cluster, and that is the memory ceiling of the whole
 module on a 8 GB laptop. A cluster left running from a previous session is the
 usual reason it does not fit.
 
+## Deployment strategies: blue-green, canary and shadow
+
+Deploying a new model is not one decision, it is a choice between three, and the
+course examines all three by name. `charts/` is where they live.
+
+| Strategy | What happens | What it buys |
+|---|---|---|
+| **Blue-green** | Both versions are up and healthy; all traffic goes to one of them. The cutover is a configuration change, and so is the way back. | A release you can reverse in seconds, without a rebuild and without waiting for pods to start. |
+| **Canary** | A defined percentage of traffic reaches the new version while the rest stays on the old one. The percentage is adjustable while both are live. | Finding out whether the new model is worse *on real traffic*, at a blast radius you chose. |
+| **Shadow** | The new version receives a **copy** of every request. Its predictions are recorded. The caller never sees them. | Comparing a candidate against production traffic at zero risk - because there is no path at all from it back to a caller. |
+
+The third one is why this block is worth doing locally. A managed endpoint will
+split traffic for you; what it will not do is run a model against production
+traffic while guaranteeing that nothing it produces is ever returned. Shadow
+deployment is the strategy that most needs the traffic layer to be something you
+can open and read.
+
+### The charts, and what was wrong with them
+
+Two of these charts are inherited. They have been in this repository for five
+years, they are on the slides, and they had never been installed once. That is
+not a guess. Check out the chart as it was inherited and it does not survive
+`helm template`, let alone `helm install`:
+
+```
+Error: abtest-model/templates/deployment.yaml:23:26
+  executing "abtest-model/templates/deployment.yaml" at <.Values.deployment.image.name>:
+    nil pointer evaluating interface {}.name
+```
+
+```
+charts/
+  abtest-model/         One model version, deployed. Installed twice, once per colour.
+  abtest-router/        The traffic layer. Blue-green, canary and shadow, no mesh.
+    files/router.py     ~300 lines of standard library. Mounted from a ConfigMap.
+  abtest-istio/         The same three strategies as a Gateway and a VirtualService.
+  load_test.sh          Sends N predictions and tallies which version answered.
+```
+
+| Where | Was | Is | Why it mattered |
+|---|---|---|---|
+| `abtest-model` values | no `deployment.image.name` at all | set, per colour | The template read it. Every install failed. |
+| `abtest-model` ports | `5001`, plus a `probe` port `8086` | `8000`, and no second port | The serving container listens on 8000 and has no probe port. The Service pointed at nothing. |
+| `abtest-model` probes | none | `/healthz`, `/readyz`, and a startup probe | Without readiness, a cutover sends traffic to a pod that has not finished unpickling its model. |
+| `abtest-model` resources | none | requests and limits | Nothing could be scheduled predictably; no HPA could ever have seen these pods. |
+| `abtest-istio` API | `networking.istio.io/v1alpha3` | `networking.istio.io/v1` | v1alpha3 was removed in Istio 1.22. |
+| `abtest-istio` path | `/score` | `/predict` | `/score` is not an endpoint of this service. |
+| `abtest-istio` mirror | absent | `mirror` + `mirrorPercentage` | The chart advertised three strategies and implemented two. |
+| both charts | one model, deployed against a byte-identical copy of itself | two models trained with different split parameters | An A/B test between identical artifacts tests the load balancer. |
+| `load_test.sh` | a bare `GET` with a header, one every 200 ms, untallied | `POST /predict`, tallied by version | 200 requests took 40 seconds and told you nothing. |
+
+The last row of that table is the important one, and it is the reason this slice
+exists at all.
+
+### Two model versions that genuinely differ
+
+There is no CI in this loop and none is needed: train twice with different split
+parameters and you have two measurably different models.
+
+```bash
+python -m automobile.entrypoints.train --run-name blue
+python -m automobile.entrypoints.train --run-name green --random-seed 7 --test-size 0.35
+```
+
+`blue` is the repository's default run - seed 42, 20% held back - and `green`
+holds back 35% of a differently-shuffled split, so it fits on 258 rows instead of
+318 and lands somewhere else.
+
+```
+                        blue            green
+test r²                 0.8476          0.7669
+test rmse               2.8628          3.5292
+cylinders coefficient   -0.260          -1.655
+displacement            1.442           2.538
+weight                  -5.684          -5.489
+
+mean |blue - green| over all 398 rows: 0.3965 mpg
+max  |blue - green|:                   2.0756 mpg
+rows differing by more than 0.25 mpg:  232 / 398
+```
+
+Same request, two answers, and the answers are how you tell which version
+replied:
+
+```
+blue   {"predictions":[14.975242297915628]}
+green  {"predictions":[14.358430890938523]}
+```
+
+The model is a build input, so a version of the model is a version of the image.
+Export both and build both - the second build reuses every layer but the last,
+so it takes seconds:
+
+```bash
+mlflow artifacts download --artifact-uri models:/<blue-id>  --dst-path serving/model-blue
+mlflow artifacts download --artifact-uri models:/<green-id> --dst-path serving/model-green
+
+docker build -f serving/Dockerfile --build-arg MODEL_DIR=serving/model-blue \
+  -t ryvion-mlops-serving:blue .
+docker build -f serving/Dockerfile --build-arg MODEL_DIR=serving/model-green \
+  -t ryvion-mlops-serving:green .
+```
+
+`MODEL_DIR` was already a build argument of `serving/Dockerfile`. Nothing about
+the image had to change to make it serve two models; that is what a build
+argument is for.
+
+### Setting the lab up
+
+```bash
+# 0. A cluster, and the images inside it.
+kind create cluster --config k8s/kind-cluster.yaml
+kubectl config use-context kind-ryvion
+
+kind load docker-image ryvion-mlops-serving:blue  --name ryvion
+kind load docker-image ryvion-mlops-serving:green --name ryvion
+
+# The router runs a stock Python image with a script mounted into it, so that
+# image has to be in the cluster too.
+docker pull python:3.11.16-slim-bookworm
+docker save --platform linux/amd64 python:3.11.16-slim-bookworm -o /tmp/py311.tar
+kind load image-archive /tmp/py311.tar --name ryvion
+
+# 1. Both model versions, from the same chart.
+helm install model-blue charts/abtest-model -n abtesting --create-namespace \
+  --set deployment.name=model-blue --set deployment.bluegreen=blue \
+  --set deployment.image.name=ryvion-mlops-serving:blue
+
+helm install model-green charts/abtest-model -n abtesting \
+  --set deployment.name=model-green --set deployment.bluegreen=green \
+  --set deployment.image.name=ryvion-mlops-serving:green
+
+# 2. The traffic layer, published on the port kind maps to the laptop.
+helm install abtest-router charts/abtest-router -n abtesting \
+  --set strategy=bluegreen --set live=blue
+
+kubectl -n abtesting rollout status deploy/model-blue
+kubectl -n abtesting rollout status deploy/model-green
+kubectl -n abtesting rollout status deploy/abtest-router
+```
+
+Two notes on the `docker save --platform` line, because both cost time to find.
+`kind load docker-image python:3.11.16-slim-bookworm` fails outright with
+`ctr: content digest sha256:...: not found`: Docker's containerd image store keeps
+a multi-platform index for a pulled image, kind imports it with `--all-platforms`,
+and the blobs for the platforms you did not pull are simply absent.
+`docker save --platform linux/amd64` exports one platform, and
+`kind load image-archive` then has everything it refers to. Locally *built*
+images do not hit this, which is why the two serving images load without ceremony.
+
+The router's Service claims **NodePort 30080**, the same port `k8s/service.yaml`
+claims. Deploy both and the second fails with `provided port is already
+allocated`. Delete the plain-YAML deployment first, or set
+`--set gateway.nodePort=` to something else and reach the router with
+`kubectl port-forward` instead.
+
+`model-svc-blue` and `model-svc-green` are `ClusterIP`. The router is the only
+thing published, and that is deliberate: it is what makes "the shadow is never
+served" a statement about reachability rather than about intent.
+
+### Blue-green, and the rollback
+
+One release, upgraded in place. Revision 1 serves blue:
+
+```
+$ curl -s localhost:30080/_router/status
+{"strategy": "bluegreen", "serving": [{"name": "blue", "url": "http://model-svc-blue...:8000",
+ "weight": 100}], "mirroring": null, "requests": {"served": {}, "mirrored": {}}}
+
+$ curl -s -D - localhost:30080/predict -H 'Content-Type: application/json' -d @record.json
+X-Model-Version: blue
+{"predictions":[14.975242297915628]}
+```
+
+The cutover:
+
+```
+$ helm upgrade abtest-router charts/abtest-router -n abtesting \
+    --set strategy=bluegreen --set live=green
+STATUS: deployed
+REVISION: 2
+
+X-Model-Version: green
+{"predictions":[14.358430890938523]}
+```
+
+And the part that matters more than the cutover - **the way back**:
+
+```
+$ helm history abtest-router -n abtesting
+REVISION  UPDATED                   STATUS      CHART                DESCRIPTION
+1         Fri Aug 21 21:49:38 2026  superseded  abtest-router-0.1.0  Install complete
+2         Fri Aug 21 21:50:19 2026  deployed    abtest-router-0.1.0  Upgrade complete
+
+$ helm rollback abtest-router 1 -n abtesting
+Rollback was a success! Happy Helming!
+
+X-Model-Version: blue
+{"predictions":[14.975242297915628]}
+
+$ helm history abtest-router -n abtesting
+REVISION  UPDATED                   STATUS      CHART                DESCRIPTION
+1         Fri Aug 21 21:49:38 2026  superseded  abtest-router-0.1.0  Install complete
+2         Fri Aug 21 21:50:19 2026  superseded  abtest-router-0.1.0  Upgrade complete
+3         Fri Aug 21 21:50:34 2026  deployed    abtest-router-0.1.0  Rollback to 1
+```
+
+Read revision 3's description. `helm rollback` is not a second forward change
+that happens to restore the old values - it is recorded as a rollback, and the
+release history says which revision it went back to. That distinction is the
+whole reason to keep the traffic decision in a Helm release instead of in
+`kubectl edit svc`.
+
+Notice what did **not** happen: neither model pod restarted, and nothing was
+rebuilt. Blue and green were both up and healthy the entire time. That is the
+property being bought - the rollback costs one pod restart of a 20 MB router,
+not a redeploy of a model.
+
+### Canary, and adjusting the split
+
+```
+$ helm upgrade abtest-router charts/abtest-router -n abtesting \
+    --set strategy=canary --set canary.weight=10
+REVISION: 4
+
+$ charts/load_test.sh 200
+POST http://localhost:30080/predict x200
+    180 blue
+     20 green
+blue       180   90.0%
+green       20   10.0%
+```
+
+Then move it, with no model pod touched:
+
+```
+$ kubectl -n abtesting get pods -l app=model
+model-blue-c5dbf99c9-l427j     age: 2m22s
+model-green-69c46f8dbc-qdcmn   age: 2m19s
+
+$ helm upgrade abtest-router charts/abtest-router -n abtesting \
+    --set strategy=canary --set canary.weight=40
+REVISION: 5
+
+$ charts/load_test.sh 200
+POST http://localhost:30080/predict x200
+    120 blue
+     80 green
+blue       120   60.0%
+green       80   40.0%
+
+$ kubectl -n abtesting get pods -l app=model
+model-blue-c5dbf99c9-l427j     age: 3m19s   # same pods, same age
+model-green-69c46f8dbc-qdcmn   age: 3m16s
+```
+
+Exactly 120 and 80, not "about". The router splits with **smooth weighted
+round-robin**, the algorithm nginx uses for upstream weights: each version
+accumulates its weight on every request, the largest accumulator wins and then
+pays the total back. Over any run of 100 requests each version is picked exactly
+`weight` times, and the picks are interleaved rather than arriving in blocks.
+
+A mesh usually splits on a hash of the request instead, so its numbers wobble -
+the same 200 requests through Istio at 25% gave 51 rather than 50 further down
+this page. Neither is more correct; it is worth saying out loud when the counts
+come out suspiciously round.
+
+**One honest wrinkle.** The first run of the 40% test reported 122/78, not
+120/80, and `/_router/status` explained why: the new router pod had only counted
+196 of the 200 requests. Four had been answered by the *outgoing* pod, which was
+still in the Service's EndpointSlice for a moment after `kubectl rollout status`
+returned, and was still on 90/10. A traffic split is a property of a running
+process, and for a second during a rollout there are two of them. Send the 200
+requests again once the dust settles and the numbers are exact.
+
+### Shadow: mirrored, recorded, never served
+
+```
+$ helm upgrade abtest-router charts/abtest-router -n abtesting \
+    --set strategy=shadow --set shadow.serving=blue --set shadow.mirror=green
+REVISION: 6
+
+$ curl -s localhost:30080/_router/status
+{"strategy": "shadow",
+ "serving":   [{"name": "blue",  "url": "...model-svc-blue...",  "weight": 100}],
+ "mirroring":  {"name": "green", "url": "...model-svc-green...", "percentage": 100,
+                "paths": ["/predict"], "recorded": 0},
+ "requests": {"served": {}, "mirrored": {}}}
+```
+
+`serving` and `mirroring` are two different fields, and that is the whole design.
+The mirror target is not in the routing table, so there is no code path that can
+select it to answer a caller.
+
+100 requests through the gateway:
+
+```
+distinct X-Model-Version values seen by the caller:
+    100 blue
+distinct response bodies seen by the caller:
+    100 {"predictions":[14.975242297915628]}
+```
+
+One hundred responses, one distinct body, and it is blue's. Green's answer to the
+same record - asked of `model-svc-green` directly, from inside the cluster - is:
+
+```
+{"predictions":[14.358430890938523]}
+```
+
+That number appears in no response the caller received. It appears here:
+
+```
+$ curl -s localhost:30080/_router/shadow
+mirroring: green
+recorded: 100
+{"at": 1787342127.088801, "path": "/predict", "served_by": "blue",
+ "served_predictions": [14.975242297915628],
+ "shadow": "green", "shadow_status": 200,
+ "shadow_predictions": [14.358430890938523]}
+```
+
+and in the router's log, one JSON object per mirrored request, which is what a
+real shadow deployment would ship to the same place its metrics go:
+
+```
+$ kubectl -n abtesting logs deploy/abtest-router --tail=1
+{"ts": 1787342127.6684906, "msg": "mirrored", "path": "/predict", "served_by": "blue",
+ "served_predictions": [14.975242297915628], "shadow": "green",
+ "shadow_status": 200, "shadow_predictions": [14.358430890938523]}
+```
+
+Both predictions are recorded side by side on purpose. A shadow deployment whose
+record does not include what production said at the same moment tells you what
+the candidate predicted but not whether it disagreed.
+
+Now try to get the shadow's answer out of it. `x-api-version` pins a request to a
+named version, and it is the header `charts/load_test.sh` has always sent:
+
+```
+$ curl -si localhost:30080/predict -H 'x-api-version: green' -d @record.json
+HTTP/1.1 409 Conflict
+{"detail": "'green' is a shadow deployment: it receives mirrored traffic and its
+ predictions are recorded, never served. See GET /_router/shadow."}
+```
+
+The counters agree:
+
+```
+"requests": {"served": {"blue": 100}, "mirrored": {"green": 100}}
+```
+
+Green answered 100 requests and served zero of them.
+
+### The memory decision: a mesh, or 300 lines of Python
+
+The inherited chart implements all of this with Istio, and Istio is the right
+answer on a cluster that already runs one. The question for this course is
+narrower: what does it cost on the laptop that also has to fit a monitoring
+stack, and is the difference worth what it buys?
+
+That is a measurement, not an opinion. All four numbers below are
+`docker stats --no-stream` against the three kind node containers, on the same
+cluster, in one sitting, on an 8 GB machine (`7.611GiB` total as Docker reports
+it):
+
+| Cluster state | control-plane | worker | worker2 | total | delta |
+|---|---|---|---|---|---|
+| Fresh 3-node cluster, nothing deployed | 659.5 MiB | 140.1 MiB | 145.0 MiB | **945 MiB** | - |
+| + metrics-server, both model versions, the router | 1046.5 MiB | 656.5 MiB | 554.3 MiB | **2257 MiB** | +1312 MiB |
+| + istiod and an Istio ingress gateway | 1147.9 MiB | 709.5 MiB | 622.4 MiB | **2480 MiB** | +222 MiB |
+| + a sidecar injected into each model pod | 1191.9 MiB | 1015.0 MiB | 442.8 MiB | **2650 MiB** | +392 MiB total |
+
+And per pod, from `kubectl top`:
+
+```
+abtest-router                18Mi
+model-blue / model-green    206Mi each   (182Mi + a 27Mi istio-proxy once injected)
+istiod                       41Mi
+istio-ingressgateway         25Mi
+```
+
+**Istio, on this cluster, costs about 390 MiB resident - not the ~1 GB the plan
+for this slice assumed.** The estimate was pessimistic and the measurement says
+so. A mesh is affordable here; that is the honest finding and it is worth
+recording, because the decision below does not rest on it.
+
+The router is **18 MiB**. That is the comparison that survives: not 1 GB against
+20 MB, but 390 MiB against 18 MiB, twenty times cheaper, on the machine where a
+later section of this course adds Prometheus and Grafana to the same cluster.
+Alongside that:
+
+- Istio is three more Helm releases, about thirty CRDs and roughly 600 MB of
+  images to pull. None of it works offline the first time. The router needs one
+  image the serving build has already pulled.
+- Turning the mesh on means labelling the namespace and **restarting every
+  workload** so a sidecar can be injected. That is a real operation with real
+  consequences, and it is not one you want between two five-minute labs.
+- Istio's `mirror` sends the copy and **discards the response**. The mirrored
+  workload's own logs record that a request arrived; nothing records what it
+  predicted. "Its predictions are recorded" - the criterion this slice is judged
+  on - needs machinery Istio does not supply. The router records both predictions
+  because recording them is its entire reason for existing.
+
+So the router is the default and the mesh is the reference. The teaching goal is
+that a student can operate all three strategies and explain the difference; it is
+not that they install a service mesh.
+
+### The Istio path, for a cluster that already has a mesh
+
+`charts/abtest-istio` speaks the same vocabulary as `charts/abtest-router` -
+`strategy`, `live`, `canary.weight`, `shadow.serving`, `shadow.mirror` - so the
+two are diffable as the same idea in two languages. Everything below was run
+against a real Istio 1.30.3 on the cluster measured above.
+
+```bash
+helm repo add istio https://istio-release.storage.googleapis.com/charts
+helm install istio-base istio/base --version 1.30.3 -n istio-system --create-namespace
+helm install istiod istio/istiod --version 1.30.3 -n istio-system --wait
+helm install istio-ingressgateway istio/gateway --version 1.30.3 -n istio-system --wait
+
+helm install abtest-istio charts/abtest-istio -n abtesting \
+  --set strategy=shadow --set shadow.serving=blue --set shadow.mirror=green
+
+# kind has no cloud load balancer, so the gateway Service stays <pending>.
+kubectl -n istio-system port-forward svc/istio-ingressgateway 18080:80
+```
+
+Shadow, through the mesh:
+
+```
+access-log POST /predict counts before: blue=0 green=0
+
+--- 20 requests through the Istio ingress gateway ---
+distinct bodies the caller received:
+     20 {"predictions":[14.975242297915628]}
+
+access-log POST /predict counts after:  blue=20 green=20
+delta: blue=20 green=20
+```
+
+Green handled twenty requests and served none of them - and note how that had to
+be established: by counting lines in the mirrored pod's *access log*, because
+Envoy threw the predictions away. The router's `/_router/shadow` is what that
+gap costs you.
+
+Asking Istio for the shadow by name is refused the same way, by a
+`directResponse` rule placed ahead of the routing rules:
+
+```
+HTTP/1.1 409 Conflict
+{"detail":"green is a shadow deployment: it receives mirrored traffic and its
+ predictions are recorded, never served."}
+```
+
+Canary and blue-green, through the mesh:
+
+```
+$ helm upgrade abtest-istio charts/abtest-istio -n abtesting \
+    --set strategy=canary --set canary.weight=25
+     51 {"predictions":[14.358430890938523]}    # green, 25.5%
+    149 {"predictions":[14.975242297915628]}    # blue
+
+$ helm upgrade abtest-istio ... --set strategy=bluegreen --set live=blue    # rev 3
+{"predictions":[14.975242297915628]}
+$ helm upgrade abtest-istio ... --set strategy=bluegreen --set live=green   # rev 4
+{"predictions":[14.358430890938523]}
+$ helm rollback abtest-istio -n abtesting                                   # rev 5
+{"predictions":[14.975242297915628]}
+```
+
+Note 51 rather than 50: Istio distributes per request rather than in a fixed
+rotation, so its splits are approached rather than hit.
+
+### What the router is not
+
+It is a teaching artifact for one job, and everything a mesh does beyond that job
+is absent from it. Written down, so that nobody mistakes it for the real thing:
+
+- **No mutual TLS, no identity, no authorization policy.** Plain HTTP inside the
+  cluster. A mesh's main selling point in production is the one thing this does
+  not attempt.
+- **No retries, timeouts beyond a flat one, circuit breaking or outlier
+  detection.** A failing upstream stays in the rotation.
+- **No telemetry.** Counters at `/_router/status` and a log line per mirrored
+  request, held in memory and lost when the pod restarts. No metrics endpoint,
+  and nothing for issue #24's Prometheus to scrape yet.
+- **It is a single hop, not a data plane.** One Deployment in front of two
+  Services. It sees only traffic that comes through the gateway; service-to-service
+  calls inside the cluster bypass it entirely, where a sidecar mesh would not.
+- **One replica by default, so it is a single point of failure**, and the split
+  counters are per-pod - scale it to two and each keeps its own rotation.
+- **Header-pinned requests do not advance the split.** Convenient for testing,
+  and a difference from a mesh worth knowing before you trust a tally.
+
+If any of those matter, the answer is `charts/abtest-istio` and the 390 MiB, not
+a bigger `router.py`.
+
+### Teardown
+
+The same rule as every other cluster in this course, and the same trap:
+
+```bash
+kind delete cluster --name ryvion
+kind get clusters
+# No kind clusters found.
+```
+
+Run the second command. `kind delete cluster` without `--name` deletes a cluster
+called `kind`, reports success, and leaves `ryvion` running.
+
+If you installed Istio and want the cluster back without it,
+`helm uninstall istio-ingressgateway istiod istio-base -n istio-system`, then
+`kubectl label namespace abtesting istio-injection-` and restart the model
+deployments to shed the sidecars. Deleting the cluster is faster.
+
 ## Repository layout
 
 ```
@@ -990,7 +1507,8 @@ tests/                 Unit tests, plus one integration test of the refusal path
 .github/workflows/     GitHub Actions: the always-on quality gate, and the pipeline.
 .github/actions/       One local composite action: Python and the locked environment.
 .pipelines/            Azure Pipelines: the definitions the course studies.
-charts/                Helm charts for the A/B deployment material.
+charts/                Helm charts: two model versions, and the traffic layer that
+                       does blue-green, canary and shadow deployment on top of them.
 notebooks/             The exploratory notebook the course opens with.
 docs/                  The PRD, and the conventions the agents in this repo follow.
 ```
@@ -1041,14 +1559,20 @@ Both run `flake8 .` and `pytest`. In the predecessor, the template holding those
 two commands was commented out of the pipeline, so neither ever ran. Here it is
 included.
 
-## Carried over from the predecessor, unchanged
+## Carried over from the predecessor
 
-The Helm charts (`charts/abtest-model`, `charts/abtest-istio`), the load
-generator (`charts/load_test.sh`), the Helm install and upgrade templates
-(`.pipelines/helm-*.yml`) and the exploratory notebook (`notebooks/`) are copied
-across byte-for-byte. Everything else from that repository was deleted by
-design: the orchestration package, the duplicated scoring scripts, the R and
-Databricks training path, and the parallel batch-scoring path.
+The Helm install and upgrade templates (`.pipelines/helm-*.yml`) and the
+exploratory notebook (`notebooks/`) are copied across byte-for-byte.
+
+The Helm charts (`charts/abtest-model`, `charts/abtest-istio`) and the load
+generator (`charts/load_test.sh`) were carried across byte-for-byte too, and are
+no longer: see [Deployment strategies](#deployment-strategies-blue-green-canary-and-shadow)
+for what was wrong with each of them and what it was repaired to. They were
+repaired rather than replaced, because they are on the slides.
+
+Everything else from that repository was deleted by design: the orchestration
+package, the duplicated scoring scripts, the R and Databricks training path, and
+the parallel batch-scoring path.
 
 ## Where this is going
 

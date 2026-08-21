@@ -1,0 +1,26 @@
+# The one way in.
+#
+# Both model Services are ClusterIP, so this is the only address a caller outside
+# the cluster has. That is not a convenience: it is what makes the shadow
+# guarantee checkable. If the mirrored version had its own published address, "it
+# is never served" would be a claim about intent rather than about reachability.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.router.name }}
+spec:
+  type: NodePort
+  selector:
+    app: {{ .Values.router.name }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.port }}
+      targetPort: http
+      # Fixed rather than assigned, so that it matches the extraPortMappings in
+      # k8s/kind-cluster.yaml and `curl localhost:30080/...` works from the
+      # laptop. See the note in values.yaml about sharing it with k8s/service.yaml.
+      nodePort: {{ .Values.gateway.nodePort }}
+      protocol: TCP

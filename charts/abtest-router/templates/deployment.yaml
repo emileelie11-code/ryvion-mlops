@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.router.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.router.name }}
+spec:
+  replicas: {{ .Values.router.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.router.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.router.name }}
+      annotations:
+        # The routing table travels as environment variables, so changing the
+        # split changes the pod template and Kubernetes rolls the pod by itself.
+        # The source does not: a ConfigMap edit alone would leave the old code
+        # running until something else happened to restart the pod. This
+        # checksum closes that gap - it is the standard Helm idiom for it.
+        checksum/router-source: {{ .Files.Get "files/router.py" | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: router
+          image: "{{ .Values.router.image.name }}"
+          imagePullPolicy: {{ .Values.router.image.pullPolicy }}
+          command: ["python", "/opt/router/router.py"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.router.port }}
+              protocol: TCP
+          env:
+            # Informational: the router's behaviour follows from ROUTER_ROUTES
+            # and ROUTER_MIRROR, not from this. It is here so that
+            # GET /_router/status can say which lab you are in.
+            - name: ROUTER_STRATEGY
+              value: {{ .Values.strategy | quote }}
+            # The versions that may answer a caller.
+            - name: ROUTER_ROUTES
+              value: {{ include "abtest-router.routes" . | quote }}
+            # The version that receives a copy and never answers. Empty in every
+            # strategy but shadow.
+            - name: ROUTER_MIRROR
+              value: {{ include "abtest-router.mirror" . | quote }}
+            - name: ROUTER_MIRROR_PATHS
+              value: {{ .Values.shadow.paths | quote }}
+            - name: ROUTER_RECORD_CAPACITY
+              value: {{ .Values.shadow.capacity | quote }}
+            - name: ROUTER_PORT
+              value: {{ .Values.router.port | quote }}
+            - name: ROUTER_TIMEOUT
+              value: {{ .Values.router.timeout | quote }}
+            # The root filesystem is read-only and the source is mounted from a
+            # read-only ConfigMap, so there is nowhere to write a .pyc.
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # Unbuffered, or the mirrored-prediction log lines would sit in a
+            # pipe buffer and `kubectl logs -f` would show nothing.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: source
+              mountPath: /opt/router
+              readOnly: true
+          # /_router/healthz is answered by the router itself and is never
+          # proxied. A probe on /healthz would be forwarded to a model version
+          # instead, which would make the gateway look unhealthy whenever the
+          # thing behind it was - and take the router out of service exactly
+          # when you needed it to route around the failure.
+          livenessProbe:
+            httpGet:
+              path: /_router/healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /_router/healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+{{ toYaml .Values.router.resources | indent 12 }}
+      volumes:
+        - name: source
+          configMap:
+            name: {{ .Values.router.name }}-code

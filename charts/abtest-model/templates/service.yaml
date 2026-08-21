@@ -1,13 +1,35 @@
+# One Service per colour: `model-svc-blue` and `model-svc-green`.
+#
+# These are the two addresses every deployment strategy in this repository is
+# built out of. Nothing here decides which of them a caller reaches - that is the
+# router's job, or the mesh's - so each colour keeps a stable name that is always
+# resolvable, whether or not it is currently taking production traffic.
+#
+# The selector includes `model_version`, which is what keeps the two apart. Drop
+# it and both colours land behind one Service, requests alternate between two
+# different models at random, and the "A/B test" becomes a coin toss with no
+# record of which side answered.
 apiVersion: v1
 kind: Service
 metadata:
   name: "{{ .Values.svc.name }}-{{ .Values.deployment.bluegreen }}"
   namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.appname }}
+    model_version: {{ .Values.deployment.bluegreen }}
 spec:
+  # ClusterIP: reachable inside the cluster only. The gateway in
+  # charts/abtest-router is the single thing published to the laptop, so there
+  # is exactly one way in and it is the one that does the splitting.
+  type: ClusterIP
   selector:
-    app: {{ .Values.appname }}   
+    app: {{ .Values.appname }}
     model_version: {{ .Values.deployment.bluegreen }}
   ports:
-    - port: {{ .Values.svc.port }}
-      targetPort: {{ .Values.deployment.container.port }}
-      
+    - name: http
+      port: {{ .Values.svc.port }}
+      # By name rather than by number. The container's port is declared once,
+      # in the Deployment; the inherited chart repeated the number here and in
+      # values.yaml, which is how the two came to disagree with the image.
+      targetPort: http
+      protocol: TCP

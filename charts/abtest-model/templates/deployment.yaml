@@ -7,7 +7,7 @@ metadata:
     app: {{ .Values.appname }}
     model_version: {{ .Values.deployment.bluegreen }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.deployment.replicas }}
   selector:
     matchLabels:
       app: {{ .Values.appname }}
@@ -18,13 +18,72 @@ spec:
         app: {{ .Values.appname }}
         model_version: {{ .Values.deployment.bluegreen }}
     spec:
+      securityContext:
+        # The image declares USER 10001:10001 numerically. Kubernetes cannot
+        # resolve a user *name* against an image, so runAsNonRoot on an image
+        # whose USER is a name refuses to start.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: {{ .Values.deployment.container.name }}
         image: "{{ .Values.deployment.image.name }}"
-        imagePullPolicy: Always
+        imagePullPolicy: {{ .Values.deployment.image.pullPolicy }}
         ports:
+        # One port. The inherited template declared a second one, `probe` on
+        # 8086, for a probe framework this image does not have and this chart
+        # never configured. Both numbers were wrong and neither was used.
         - name: http
-          containerPort: 5001
-        - name: probe
-          containerPort: 8086
-
+          containerPort: {{ .Values.deployment.container.port }}
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        # MLflow resolves a default file store relative to the working
+        # directory on import, and the image points MLFLOW_TRACKING_URI at
+        # /tmp so that attempt lands somewhere writable under a read-only
+        # root filesystem. This is that somewhere.
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        # --- The probes the inherited chart did not have -------------------
+        #
+        # Without a readiness probe a blue-green cutover is a coin toss: the
+        # Service adopts a pod the moment it is Running, which is several
+        # seconds before it has unpickled its model, and the first requests
+        # after the switch get a 503 from a model version that is technically
+        # live. The probe is what makes "switch the label" safe.
+        startupProbe:
+          httpGet:
+            path: {{ .Values.deployment.probes.liveness }}
+            port: http
+          periodSeconds: 2
+          failureThreshold: {{ div .Values.deployment.probes.startupSeconds 2 }}
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.deployment.probes.liveness }}
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.deployment.probes.readiness }}
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+          successThreshold: 1
+        resources:
+{{ toYaml .Values.deployment.resources | indent 10 }}
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      # uvicorn is PID 1 and handles SIGTERM itself, so a pod being replaced
+      # during a cutover drains rather than being killed.
+      terminationGracePeriodSeconds: 20

@@ -1,11 +1,22 @@
-apiVersion: networking.istio.io/v1alpha3
+{{- $ns := .Values.namespace -}}
+{{- $svc := .Values.svc.name -}}
+{{- $port := int .Values.svc.port -}}
+{{- $host := printf "%s-%%s.%s.svc.cluster.local" $svc $ns -}}
+# The mesh expression of the same three strategies charts/abtest-router
+# implements in about 300 lines of standard-library Python.
+#
+# Read the two side by side: the shape is the same - a set of destinations that
+# may answer, an optional mirror that may not - and everything Istio adds beyond
+# that shape (mutual TLS, retries, outlier detection, per-hop telemetry) is what
+# you are paying its control plane and its sidecars for.
+apiVersion: networking.istio.io/v1
 kind: Gateway
 metadata:
-  name: mlmodel-gateway
-  namespace: abtesting
+  name: {{ .Values.gateway.name }}
+  namespace: {{ $ns }}
 spec:
   selector:
-    istio: ingressgateway
+{{ toYaml .Values.gateway.selector | indent 4 }}
   servers:
   - port:
       number: {{ .Values.ingress.port }}
@@ -13,48 +24,111 @@ spec:
       protocol: HTTP
     hosts:
     - "*"
----      
-apiVersion: networking.istio.io/v1alpha3
+---
+apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
-  name: mlmodel-virtualservice
-  namespace: abtesting
+  name: {{ .Values.gateway.virtualService }}
+  namespace: {{ $ns }}
 spec:
   gateways:
-    - mlmodel-gateway 
+    - {{ .Values.gateway.name }}
   hosts:
-    - '*'    
+    - '*'
+  # Rules are evaluated in order and the first match wins. That ordering is
+  # load-bearing below: the refusal to serve a shadow has to come before the
+  # rules that would happily route to it.
   http:
+{{- if eq .Values.strategy "shadow" }}
+  # A caller asking for the shadow version by name is refused rather than
+  # served. This is the same 409 charts/abtest-router returns, and it exists for
+  # the same reason: "its predictions are never served" should be a property you
+  # can try to violate and fail, not a sentence in a README.
   - match:
     - uri:
-        prefix: /score
+        prefix: {{ .Values.uri.prefix }}
       headers:
         x-api-version:
-          exact: 'blue'
-    route:
-    - destination:
-        host: {{ .Values.svc.name }}-blue.abtesting.svc.cluster.local  
-        port:
-          number: {{ .Values.svc.port }}
+          exact: {{ .Values.shadow.mirror | quote }}
+    directResponse:
+      status: 409
+      body:
+        string: >-
+          {"detail":"{{ .Values.shadow.mirror }} is a shadow deployment: it receives
+          mirrored traffic and its predictions are recorded, never served."}
+{{- end }}
+  # Pin a request to one version for testing. charts/load_test.sh has always
+  # sent this header; until now there was nothing behind it listening on a port
+  # that existed.
+{{- range $colour := list "blue" "green" }}
+{{- if not (and (eq $.Values.strategy "shadow") (eq $colour (toString $.Values.shadow.mirror))) }}
   - match:
     - uri:
-        prefix: /score
+        prefix: {{ $.Values.uri.prefix }}
       headers:
         x-api-version:
-          exact: 'green'
+          exact: {{ $colour | quote }}
     route:
     - destination:
-        host: {{ .Values.svc.name }}-green.abtesting.svc.cluster.local  
+        host: {{ printf $host $colour }}
         port:
-          number: {{ .Values.svc.port }}
+          number: {{ $port }}
+{{- end }}
+{{- end }}
+{{- if eq .Values.strategy "shadow" }}
+  # Everything to the serving version, and a copy of every prediction request to
+  # the shadow. `mirror` is fire-and-forget: Envoy sends the copy, appends
+  # `-shadow` to its Host header so the mirrored workload can tell, and discards
+  # whatever comes back. The caller's latency and the caller's answer are both
+  # untouched by it.
+  - match:
+    - uri:
+        prefix: {{ .Values.uri.prefix }}
+    route:
+    - destination:
+        host: {{ printf $host (toString .Values.shadow.serving) }}
+        port:
+          number: {{ $port }}
+    mirror:
+      host: {{ printf $host (toString .Values.shadow.mirror) }}
+      port:
+        number: {{ $port }}
+    mirrorPercentage:
+      value: {{ .Values.shadow.percentage }}
+  # Health probes and /schema: routed, never mirrored.
   - route:
     - destination:
-        host: {{ .Values.svc.name }}-green.abtesting.svc.cluster.local  
+        host: {{ printf $host (toString .Values.shadow.serving) }}
         port:
-          number: {{ .Values.svc.port }}
-      weight: {{ .Values.weight.green }}
+          number: {{ $port }}
+{{- else if eq .Values.strategy "canary" }}
+  {{- $weight := int .Values.canary.weight }}
+  {{- if or (lt $weight 0) (gt $weight 100) }}
+    {{- fail (printf "canary.weight must be between 0 and 100, got %d" $weight) }}
+  {{- end }}
+  # The split. Istio distributes on a per-request basis, so unlike the router's
+  # weighted round-robin these proportions are approached rather than hit
+  # exactly - expect the counts to wobble by a few percent over a few hundred
+  # requests.
+  - route:
     - destination:
-        host: {{ .Values.svc.name }}-blue.abtesting.svc.cluster.local  
+        host: {{ printf $host (toString .Values.canary.stable) }}
         port:
-          number: {{ .Values.svc.port }}
-      weight: {{ .Values.weight.blue }}
+          number: {{ $port }}
+      weight: {{ sub 100 $weight }}
+    - destination:
+        host: {{ printf $host (toString .Values.canary.candidate) }}
+        port:
+          number: {{ $port }}
+      weight: {{ $weight }}
+{{- else if eq .Values.strategy "bluegreen" }}
+  # All of it to one colour. The cutover is `helm upgrade --set live=green`, and
+  # the way back is `helm rollback`.
+  - route:
+    - destination:
+        host: {{ printf $host (toString .Values.live) }}
+        port:
+          number: {{ $port }}
+{{- else }}
+  {{- fail (printf "strategy must be bluegreen, canary or shadow, got %q" .Values.strategy) }}
+{{- end }}

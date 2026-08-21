@@ -48,3 +48,9 @@ Thumbs.db
 
 # Local, per-developer Claude Code settings
 .claude/settings.local.json
+
+# The two exported model versions the deployment-strategy labs deploy side by
+# side. Same build inputs as serving/model/, produced by two training runs with
+# different split parameters. See "Deployment strategies" in the README.
+serving/model-blue/
+serving/model-green/

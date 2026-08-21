@@ -1,15 +1,66 @@
+# The same three strategies as charts/abtest-router, expressed as a service mesh
+# would express them. This is the reference implementation, not the default one:
+# read the README's memory measurement before you install a mesh on a laptop.
+#
+# What was repaired here:
+#
+#   * `svc.port: 5001` pointed at a port the serving container does not listen
+#     on. It is 8000.
+#   * `uri.prefix: /score` matched a path that does not exist. The serving
+#     container's prediction endpoint is /predict.
+#   * The API version was networking.istio.io/v1alpha3, removed from Istio in
+#     1.22. It is v1.
+#   * There was no `mirror` stanza at all, so the chart advertised three
+#     strategies and implemented two. Shadow deployment - the one thing a
+#     managed traffic-splitting endpoint cannot give you - was the missing one.
+#   * The weights were a fixed 50/50 with both destinations pointing at model
+#     versions built from byte-identical scoring scripts, which is what made the
+#     inherited "A/B test" a test of nothing.
+
+namespace: abtesting
+
+# bluegreen | canary | shadow. Selects which routing rules are rendered; the
+# vocabulary is identical to charts/abtest-router on purpose, so the two charts
+# can be diffed against each other as the same idea in two languages.
+strategy: bluegreen
+
+# --- bluegreen ---------------------------------------------------------------
+live: blue
+
+# --- canary ------------------------------------------------------------------
+canary:
+  stable: blue
+  candidate: green
+  weight: 10
+
+# --- shadow ------------------------------------------------------------------
+shadow:
+  serving: blue
+  mirror: green
+  # Istio's own name for it. The mesh sends the copy with `-shadow` appended to
+  # the Host header and discards the response; the mirrored workload's own
+  # access log and telemetry are where the predictions are read back from.
+  percentage: 100
+
+# The Services charts/abtest-model creates, one per colour.
+svc:
+  name: model-svc
+  port: 8000
+
+# The prediction endpoint. Used to scope both the header pins and the mirror, so
+# that health probes are neither pinnable nor mirrored.
+uri:
+  prefix: /predict
+
 ingress:
   port: 80
 
-svc:
-  port: 5001
-  name: model-svc
-
-  
-weight:
-  green: 50
-  blue: 50
-
-uri:
-  prefix: /score
-
+gateway:
+  name: mlmodel-gateway
+  virtualService: mlmodel-virtualservice
+  # The label Istio's own ingress gateway Deployment carries. A Gateway whose
+  # selector matches no pod is accepted by the API server and silently routes
+  # nothing, which is the most common way an Istio lab appears to do nothing at
+  # all.
+  selector:
+    istio: ingressgateway

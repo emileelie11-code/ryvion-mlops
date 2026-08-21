@@ -1,0 +1,104 @@
+# The traffic layer. One release of this chart, upgraded in place, is all three
+# deployment strategies:
+#
+#   helm upgrade --install abtest-router charts/abtest-router -n abtesting \
+#     --set strategy=bluegreen --set live=blue
+#
+#   helm upgrade abtest-router charts/abtest-router -n abtesting \
+#     --set strategy=canary --set canary.weight=10
+#
+#   helm upgrade abtest-router charts/abtest-router -n abtesting \
+#     --set strategy=shadow --set shadow.serving=blue --set shadow.mirror=green
+#
+# and a rollback is `helm rollback abtest-router <revision>`, which is a real
+# rollback of a real release rather than a second forward change dressed as one.
+#
+# Why this chart exists at all is a memory decision, and the README shows the
+# measurement behind it. charts/abtest-istio expresses exactly the same three
+# strategies as a Gateway and a VirtualService, and is the better answer on a
+# cluster that already runs a mesh. It is not the better answer on an 8 GB
+# laptop that also has to fit a monitoring stack.
+
+namespace: abtesting
+
+# Which strategy the router is configured for. This selects the routing table
+# below; the router process itself only ever sees "these upstreams may answer,
+# this one gets a copy".
+#
+#   bluegreen  all traffic to `live`
+#   canary     `canary.weight` percent to `canary.candidate`, the rest to stable
+#   shadow     all traffic to `shadow.serving`, a copy to `shadow.mirror`
+strategy: bluegreen
+
+# --- bluegreen ---------------------------------------------------------------
+# The colour currently serving production. Changing this and running
+# `helm upgrade` is the cutover; `helm rollback` is the way back.
+live: blue
+
+# --- canary ------------------------------------------------------------------
+canary:
+  stable: blue
+  candidate: green
+  # Percent of requests the candidate answers. Adjustable by `helm upgrade`
+  # alone - no pod is restarted and no image is rebuilt, because the split lives
+  # in the router's configuration rather than in either model.
+  weight: 10
+
+# --- shadow ------------------------------------------------------------------
+shadow:
+  # The colour whose predictions are returned to callers.
+  serving: blue
+  # The colour that receives a copy of every request. Its predictions are
+  # recorded at GET /_router/shadow and are NEVER returned - asking for this
+  # colour by name with `x-api-version` gets a 409 saying so.
+  mirror: green
+  # Istio calls this mirrorPercentage. 100 mirrors everything.
+  percentage: 100
+  # Only requests to these paths are mirrored. /predict is the one that produces
+  # a prediction worth recording; mirroring health probes would just double the
+  # noise.
+  paths: /predict
+  # How many mirrored predictions to keep for GET /_router/shadow. In-memory and
+  # bounded: a demonstration of recording, not a metrics backend.
+  capacity: 200
+
+# --- where the model versions live -------------------------------------------
+# Resolves to http://<service>-<colour>.<namespace>.svc.cluster.local:<port>,
+# which is exactly what charts/abtest-model creates.
+upstream:
+  service: model-svc
+  port: 8000
+
+router:
+  name: abtest-router
+  replicas: 1
+  # A stock Python image with this chart's router.py mounted into it from a
+  # ConfigMap. There is deliberately no image to build: the router is standard
+  # library only, so the labs need nothing rebuilt between them. This is the
+  # same base image serving/Dockerfile builds on, so `kind load docker-image`
+  # has it already.
+  image:
+    name: python:3.11.16-slim-bookworm
+    pullPolicy: IfNotPresent
+  port: 8080
+  # Seconds to wait on an upstream, for the served call and the mirrored one
+  # alike.
+  timeout: 10
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# --- the way in --------------------------------------------------------------
+gateway:
+  name: model-gateway
+  port: 80
+  # NodePort 30080 is the port k8s/kind-cluster.yaml publishes to the laptop, so
+  # `curl localhost:30080/predict` reaches the router. It is the SAME port
+  # k8s/service.yaml claims: deploy both and the second one fails with "provided
+  # port is already allocated". Delete the plain-YAML deployment first, or
+  # override this and use `kubectl port-forward` instead.
+  nodePort: 30080
