@@ -48,7 +48,7 @@ python -m flake8 .
 python -m pytest
 ```
 
-The last command should end in `121 passed`. If it does, your environment matches
+The last command should end in `150 passed`. If it does, your environment matches
 the one the pull-request gate uses.
 
 Then train the model, which needs no cloud account and no credentials:
@@ -82,10 +82,26 @@ above:
 | `automobile-evaluate` | `automobile.entrypoints.evaluate` | Apply the promote-or-reject gate |
 | `automobile-register` | `automobile.entrypoints.register` | Register the promoted model |
 
-`validate` and `train` are implemented. The other two parse their arguments and
-then raise `NotImplementedError`; they are filled in by the slices that follow.
-`--help` works on all four, and the test suite holds that surface in place while
-the bodies arrive.
+All four are implemented. `--help` works on all four, and the test suite holds
+that surface in place.
+
+Run end to end, the pipeline looks like this. Note the tracking destination: the
+registry that `evaluate` and `register` use needs a database behind it, and
+locally that is one SQLite file and no account.
+
+```bash
+export MLFLOW_TRACKING_URI=sqlite:///mlflow.db   # Windows: set MLFLOW_TRACKING_URI=sqlite:///mlflow.db
+
+python -m automobile.entrypoints.validate        # step zero: the data contract
+python -m automobile.entrypoints.train           # prints the run id
+python -m automobile.entrypoints.evaluate --run-id RUN_ID
+python -m automobile.entrypoints.register --run-id RUN_ID
+```
+
+Both gates report themselves the same way: `validate` exits non-zero when the
+data breaks its contract, and `evaluate` exits **0** when it promotes the
+candidate and **1** when it rejects it, so a run stops before it reaches
+`register`.
 
 ## The data contract
 
@@ -168,6 +184,51 @@ schema of named columns - and the input example deliberately includes a row whos
 `horsepower` is missing, which is what makes the column `double (optional)` in
 the signature and JSON `null` an acceptable value for it.
 
+## The quality gate
+
+Whether a candidate replaces the incumbent is a **pure function** in
+`automobile/quality_gate.py`:
+
+```python
+decide(candidate_metrics, incumbent_metrics, policy) -> GateDecision
+```
+
+It reads no files, imports no tracking library, and imports nothing outside the
+standard library at all - a unit test fails the build if that ever stops being
+true. In the predecessor this decision was entangled with the platform: the
+evaluation script compared two numbers and then reached up to cancel its own
+parent pipeline run, which meant the policy could not be read, tested or changed
+without a workspace.
+
+Three behaviours are worth knowing before you change the threshold:
+
+- **No incumbent promotes.** The first model ever trained has nothing to beat.
+  A gate that refused it would deadlock the pipeline on its first run.
+- **The boundary is inclusive.** A candidate landing exactly on the required
+  value is promoted, so `--min-improvement` reads as "at least this much
+  better".
+- **The policy is configuration.** The default is mean squared error on the
+  held-out half, minimised, with no margin demanded - and it is a default, not a
+  rule:
+
+  ```bash
+  python -m automobile.entrypoints.evaluate --run-id RUN_ID       --metric test_r2 --goal maximise --min-improvement 0.01
+  ```
+
+The verdict leaves the step two ways, on purpose. It becomes the **exit code**,
+which is what stops a pipeline - `0` promoted, `1` rejected. It is *also*
+written onto the candidate run as the tag `automobile.gate.decision`, and
+`register` refuses to register anything not tagged `promote`, including a run
+the gate has never seen. An exit code is only as good as the thing reading it,
+and `register` is also a command a person can type.
+
+There is no override flag. A gate with a bypass is not a gate.
+
+This replaces the predecessor's parent-run cancellation, and the semantics
+differ deliberately: **a rejected run now reports as failed, not cancelled.**
+Azure ML v2 has no equivalent of that cancellation, and an exit code is the
+better lesson anyway.
+
 ## Where a run is recorded
 
 The training code is backend-agnostic by construction: it reads its destination
@@ -182,6 +243,28 @@ Pointing the identical code at a managed backend is therefore a change of
 setting, not a change of code. There is no `if azure:` branch anywhere, and a
 unit test fails the build if any module in the domain package imports a cloud
 SDK.
+
+### The registry needs a database
+
+Recording runs is all `train` needs, and a directory is enough for that. The
+**model registry** that `evaluate` reads the incumbent from and `register`
+writes a version to wants somewhere it can hold a version counter, so point the
+same variable at a database instead:
+
+```bash
+export MLFLOW_TRACKING_URI=sqlite:///mlflow.db
+```
+
+That is one file in your working directory, created on first use, ignored by
+git, and still no account and no network. It is the **only** difference between
+running the gate locally and running it against the managed workspace, where the
+same variable points at the workspace instead. The destination stays
+configuration - nothing in this repository branches on it, and nothing
+hard-codes it.
+
+`mlflow ui --backend-store-uri sqlite:///mlflow.db` shows the runs, the gate
+tags and the registered versions together. To start over, delete `mlflow.db` and
+`mlartifacts/`.
 
 ## The serving container
 

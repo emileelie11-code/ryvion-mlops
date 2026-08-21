@@ -28,6 +28,10 @@ htmlcov/
 mlruns/
 mlartifacts/
 
+# MLflow local SQLite backend, which the model registry needs
+# (MLFLOW_TRACKING_URI=sqlite:///mlflow.db)
+mlflow.db
+
 # The model exported for the serving image to bake in. It is a build input
 # produced by a local training run, not something committed: the seed dataset
 # and the training code are what this repository versions.
