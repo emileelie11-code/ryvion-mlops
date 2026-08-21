@@ -27,7 +27,8 @@
 # Not hash-pinned: `--require-hashes` needs a resolver this course does not
 # install. Versions are exact, which is the property that matters here.
 #
-# Regenerated: 2026-08-20 - Python 3.11
+# Regenerated: 2026-08-21 - Python 3.11. The data-contract slice added
+# pandera and its three transitive dependencies; nothing else moved.
 
 alembic==1.19.1
 annotated-doc==0.0.5
@@ -108,6 +109,7 @@ mlflow==3.4.0
 mlflow-skinny==3.4.0
 mlflow-tracing==3.4.0
 more-itertools==11.1.0
+mypy_extensions==1.1.0
 numpy==2.2.6
 openapi-pydantic==0.5.1
 opentelemetry-api==1.44.0
@@ -116,6 +118,7 @@ opentelemetry-sdk==1.44.0
 opentelemetry-semantic-conventions==0.65b0
 packaging==25.0
 pandas==2.3.3
+pandera==0.32.1
 pathable==0.6.0
 pathvalidate==3.3.1
 pillow==12.3.0
@@ -167,7 +170,9 @@ sqlparse==0.6.0
 sse-starlette==3.4.8
 starlette==1.6.0
 threadpoolctl==3.6.0
+typeguard==4.6.0
 typer==0.27.1
+typing-inspect==0.9.0
 typing_extensions==4.16.0
 typing-inspection==0.4.4
 tzdata==2026.3

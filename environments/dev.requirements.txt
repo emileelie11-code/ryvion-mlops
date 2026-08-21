@@ -23,6 +23,10 @@ numpy==2.2.6
 pandas==2.3.3
 scikit-learn==1.7.2
 mlflow==3.4.0
+# The data contract. It runs as step zero of the training pipeline as well as
+# in the unit suite, so it is pinned here and in training.conda.yaml at the same
+# version - the validate step must behave identically in both places.
+pandera==0.32.1
 
 # --- development and CI only ---
 pytest==8.4.2

@@ -82,16 +82,22 @@ def build_parser() -> argparse.ArgumentParser:
 def select_input_example(features: pd.DataFrame, rows: int = 2) -> pd.DataFrame:
     """Pick the rows that ship with the model as its worked example.
 
-    One ordinary row, and - when the training data has one - one row carrying the
-    sentinel ``?``. The example is part of the artifact's documentation, so it
-    should show a reader that a raw row with a missing measurement in it is
-    something this model accepts, rather than something to be cleaned up first.
+    One ordinary row, and - when the training data has one - one row whose
+    measurement is missing. The example is part of the artifact's documentation,
+    and it is what MLflow infers the signature's nullability from, so it must
+    contain a hole: that is what makes ``horsepower`` a double a caller may send
+    as JSON ``null`` rather than one they must always know a number for.
+
+    The hole is looked for as a missing value rather than as the string ``?``,
+    because the ``?`` sentinel is parsed at the data boundary - see
+    :func:`automobile.dataset.parse_sentinels` - and never reaches this far.
     """
-    sentinel_row = features[features[dataset.SENTINEL_COLUMN] == dataset.SENTINEL].head(1)
-    ordinary_rows = features[features[dataset.SENTINEL_COLUMN] != dataset.SENTINEL]
-    if sentinel_row.empty:
-        return ordinary_rows.head(rows)
-    return pd.concat([ordinary_rows.head(rows - 1), sentinel_row])
+    missing = features[dataset.SENTINEL_COLUMN].isna()
+    incomplete_row = features[missing].head(1)
+    complete_rows = features[~missing]
+    if incomplete_row.empty:
+        return complete_rows.head(rows)
+    return pd.concat([complete_rows.head(rows - 1), incomplete_row])
 
 
 def main(argv: list[str] | None = None) -> int:

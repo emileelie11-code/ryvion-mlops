@@ -26,6 +26,9 @@ dependencies:
       - pandas==2.3.3
       - scikit-learn==1.7.2
       - mlflow==3.4.0
+      # The data contract. Step zero of the pipeline imports it, so the cloud
+      # training environment needs it at the same version CI tests against.
+      - pandera==0.32.1
       # Points MLflow's tracking URI at the workspace. The training code stays
       # backend-agnostic; this package is what makes the managed backend one of
       # the destinations it can be pointed at.

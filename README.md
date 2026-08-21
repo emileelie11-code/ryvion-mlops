@@ -47,7 +47,7 @@ python -m flake8 .
 python -m pytest
 ```
 
-The last command should end in `74 passed`. If it does, your environment matches
+The last command should end in `121 passed`. If it does, your environment matches
 the one the pull-request gate uses.
 
 Then train the model, which needs no cloud account and no credentials:
@@ -81,19 +81,63 @@ above:
 | `automobile-evaluate` | `automobile.entrypoints.evaluate` | Apply the promote-or-reject gate |
 | `automobile-register` | `automobile.entrypoints.register` | Register the promoted model |
 
-`train` is implemented. The other three parse their arguments and then raise
-`NotImplementedError`; they are filled in by the slices that follow. `--help`
-works on all four, and the test suite holds that surface in place while the
-bodies arrive.
+`validate` and `train` are implemented. The other two parse their arguments and
+then raise `NotImplementedError`; they are filled in by the slices that follow.
+`--help` works on all four, and the test suite holds that surface in place while
+the bodies arrive.
+
+## The data contract
+
+`automobile/data_contract.py` holds every rule about this dataset behind one
+call, `validate(frame)`, which returns a report rather than raising. The
+entrypoint turns that report into an exit code, so a bad dataset costs one
+command instead of a training run:
+
+```bash
+python -m automobile.entrypoints.validate                 # the seed dataset: exits 0
+python -m automobile.entrypoints.validate --data broken.csv
+```
+
+```
+FAIL  automobile-mpg data contract: 1 of 8 rules violated over 398 rows.
+
+mpg_is_positive [mpg]
+    every 'mpg' must be greater than zero
+    2 offending row(s): 3, 41
+    offending value(s): '-1.0'
+```
+
+Every violation is reported in one pass, and a row-level rule names the rows.
+The rules are written with [Pandera](https://pandera.readthedocs.io/) against
+defects that are genuinely in this data - the row count, the positive target, the
+type of every column, and the six holes in `horsepower` - never against invented
+ones.
+
+### The `?` sentinel, and where it is dealt with
+
+`?` is a 1983 fixed-width-file encoding artifact, not a domain concept.
+`automobile.dataset.parse_sentinels` reads it as a missing value at the data
+boundary, and `load_dataset` applies it, so `horsepower` reaches the model as a
+**nullable `double`** rather than a string. The consequence is the served
+contract: a caller sends `130.0`, or JSON `null` for "unknown", instead of
+`"130.0"` and no way at all to say "unknown".
+
+What does *not* move out to the boundary is the mean that fills those holes.
+That statistic is fitted from the training data and stays inside the model
+pipeline, where it is serialised into the artifact - moving it would reintroduce
+exactly the training/serving skew this repository was rebuilt to close. The rule
+is the line between the two: **stateless format parsing at the boundary, fitted
+transforms inside the model.**
 
 ## The dataset
 
 `data/auto-mpg.csv` is the canonical UCI *Auto MPG* dataset, committed as a seed
 fixture: 398 cars, nine columns, and **six rows whose `horsepower` is `?`
 instead of a number**. Those six are not dirt left behind by accident. They are
-the dataset's real defect, and they are what the data contract will be written
-against and what the model pipeline already survives without help from its
-caller. Do not "clean" them out of the file.
+the dataset's real defect, they are what the data contract is written against,
+and they are what the model pipeline survives without help from its caller. Do
+not "clean" them out of the file - the loader reads `?` as a missing value on the
+way in, which is a different thing from the file not having it.
 
 The file is committed rather than downloaded because a classroom that depends on
 an upstream host being reachable at 09:00 is a classroom that occasionally does
@@ -119,8 +163,9 @@ Because preprocessing is *inside* the model, its statistics are fitted and
 serialised with it, and whoever calls the model supplies nothing but a raw row.
 That is the training/serving skew the predecessor carried, closed. The model is
 logged with an MLflow signature and an input example, so the artifact declares a
-schema of named columns - and the input example deliberately includes a row
-containing `?`.
+schema of named columns - and the input example deliberately includes a row whose
+`horsepower` is missing, which is what makes the column `double (optional)` in
+the signature and JSON `null` an acceptable value for it.
 
 ## Where a run is recorded
 
@@ -164,7 +209,7 @@ no dependency list in `pyproject.toml` that would quietly become one.
 | `environments/dev.requirements.txt` | Lint and test this repository, on a laptop and on a pull-request runner. |
 
 `environments/dev.lock.txt` is the resolved output of the third, and it is what
-you and CI actually install. It pins all 149 direct and transitive packages,
+you and CI actually install. It pins all 153 direct and transitive packages,
 resolved with plain `pip` on Python 3.11 - no `uv`, no Poetry. Both are better
 tools; both are one more thing to explain in a course that already carries a
 container engine, an orchestrator, a package manager for it, a cloud ML
