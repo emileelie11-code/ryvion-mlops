@@ -1,0 +1,64 @@
+# Lab: a liveness probe failure RESTARTS the container.
+#
+# This is a strategic-merge patch against the real Deployment, not a separate
+# object - the point is to watch the running service react.
+#
+#     kubectl patch deployment ryvion-serving --patch-file k8s/labs/liveness-failure.yaml
+#     kubectl get pods -l app.kubernetes.io/name=ryvion-serving -w
+#
+# Wait about a minute. Then:
+#
+#     kubectl describe pod -l app.kubernetes.io/name=ryvion-serving | grep -A5 Events
+#
+# and undo it with:
+#
+#     kubectl apply -f k8s/deployment.yaml
+#
+# What to watch for:
+#
+#   * RESTARTS climbs: 0, then 1, then 2, roughly every half minute. The
+#     liveness probe is asking for a restart and getting one, every time.
+#   * The Events list says `Liveness probe failed: HTTP probe failed with
+#     statuscode: 404`, followed by `Container serving failed liveness probe,
+#     will be restarted`.
+#   * The pod's READY column flickers 1/1 -> 0/1 -> 1/1 as the container is
+#     killed and comes back. During each restart the pod leaves the Service, so
+#     even a self-healing restart costs availability on a single replica - which
+#     is the argument for more than one.
+#   * Eventually the restart backoff stretches out and the pod is reported as
+#     CrashLoopBackOff, even though the application never crashed once.
+#
+# The last point is the lesson. Nothing is wrong with this container: /healthz
+# answers 200 the entire time. The probe is wrong. A liveness probe pointed at
+# something that is not a liveness signal will restart a perfectly healthy
+# service forever, and the symptom looks exactly like a broken application.
+# That is why /healthz deliberately knows nothing about the model: the set of
+# conditions under which it fails is the set of conditions a restart fixes.
+spec:
+  template:
+    spec:
+      containers:
+        - name: serving
+          livenessProbe:
+            httpGet:
+              # There is no such route. FastAPI answers 404, the kubelet counts
+              # anything outside 200-399 as a failure, and three failures ten
+              # seconds apart end the container. A misspelt path in a real
+              # manifest fails in exactly this way.
+              path: /healthz-but-misspelt
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Restated unchanged, and only so that reading this patch tells you
+          # the whole probe configuration rather than two thirds of it. A
+          # strategic-merge patch leaves fields it does not mention alone, so
+          # omitting this block would have had exactly the same effect. It still
+          # points at /healthz, still succeeds, and hands over to the broken
+          # liveness probe as soon as the model has loaded.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 45

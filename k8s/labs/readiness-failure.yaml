@@ -1,0 +1,127 @@
+# Lab: a readiness probe failure takes a pod OUT OF SERVICE and leaves it running.
+#
+#     kubectl apply -f k8s/labs/readiness-failure.yaml
+#     kubectl get pods -l lab=readiness-failure -w
+#     kubectl get endpointslices -l kubernetes.io/service-name=ryvion-nomodel -o yaml
+#     kubectl describe pod -l lab=readiness-failure | tail -20
+#     kubectl exec deploy/ryvion-nomodel -- python -c \
+#       "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read())"
+#
+# Nothing is sabotaged here. This is the same image, running correctly, told to
+# load its model from a directory that does not contain one - which is the real
+# failure this probe pairing was designed around, and the one a student will
+# actually meet the first time an artifact fails to arrive.
+#
+# What to watch for:
+#
+#   * The pod reaches Running and STAYS Running. READY is 0/1, RESTARTS is 0,
+#     and it stays 0 no matter how long you watch it.
+#   * It is not in the Service. The EndpointSlice lists its IP under
+#     `conditions: ready: false` rather than as a routable endpoint, so kube-proxy
+#     sends it nothing. The pod exists, is healthy, and gets no traffic.
+#   * `kubectl describe pod` reports `Readiness probe failed: HTTP probe failed
+#     with statuscode: 503` - the kubelet records the status code and nothing
+#     more, which is worth knowing before you go looking for a reason in it.
+#   * The reason is in the response body, and you have to ask the pod for it.
+#     /healthz answers 200 from inside the container - the process is fine -
+#     while /readyz answers 503 with `could not load a model from
+#     /tmp/there-is-no-model-here`. That is the diagnosis, and it is only
+#     available because the container was left running.
+#
+# Now imagine liveness had been pointed at /readyz instead. The container would
+# be killed every thirty seconds, come back, fail to load the same missing model,
+# and be killed again - CrashLoopBackOff, with the explanation buried in the logs
+# of an instance that no longer exists. The distinction between the two probes is
+# the difference between a diagnosis and a loop.
+#
+# Clean up with:  kubectl delete -f k8s/labs/readiness-failure.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ryvion-nomodel
+  labels:
+    lab: readiness-failure
+spec:
+  # A Service of its own rather than the real one, so that this lab cannot be
+  # confused with the autoscaling lab and cannot be left behind serving 503s.
+  # It selects on the lab label; the only thing keeping the pod out of it is the
+  # readiness probe.
+  selector:
+    lab: readiness-failure
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ryvion-nomodel
+  labels:
+    lab: readiness-failure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      lab: readiness-failure
+  template:
+    metadata:
+      labels:
+        lab: readiness-failure
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: serving
+          image: ryvion-mlops-serving:local
+          imagePullPolicy: IfNotPresent
+          env:
+            # The one difference from the real Deployment. serving/loader.py
+            # reads MODEL_URI and otherwise falls back to the model/ directory
+            # beside itself; this points it at an empty path, so load_model
+            # raises, app.py remembers why instead of crashing, and /readyz
+            # answers 503 with the reason.
+            - name: MODEL_URI
+              value: /tmp/there-is-no-model-here
+          ports:
+            - name: http
+              containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          # No startupProbe here, so readiness begins failing immediately and
+          # there is less waiting around in a demonstration.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

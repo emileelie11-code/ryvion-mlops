@@ -23,8 +23,15 @@ one is not.
 - `git`.
 
 Nothing else to train the model: it runs on a laptop with no cloud account and
-no credentials. A **container engine** is needed for one section only - building
-and running the serving image - and that section still needs no cloud account.
+no credentials.
+
+Two later sections need more, and neither of them needs a cloud account either:
+
+- A **container engine** for building and running the serving image.
+- **`kind` and `kubectl`** for deploying it to Kubernetes. kind runs a whole
+  cluster as Docker containers, so the orchestration half of the course is also
+  a laptop exercise. See [the same container, on
+  Kubernetes](#the-same-container-on-kubernetes).
 
 ## Quickstart - from a fresh clone to a green test run
 
@@ -48,7 +55,7 @@ python -m flake8 .
 python -m pytest
 ```
 
-The last command should end in `150 passed`. If it does, your environment matches
+The last command should end in `172 passed`. If it does, your environment matches
 the one the pull-request gate uses.
 
 Then train the model, which needs no cloud account and no credentials:
@@ -543,12 +550,405 @@ both are read from the model, they keep working when the signature changes.
 - **`.dockerignore`** keeps the rest of the repository - your `.venv`, your
   `mlruns/`, the tests, the notebook - out of the build context entirely.
 
+## The same container, on Kubernetes
+
+`docker run` gets the service up. It does not keep it up, and it does not give
+you a second copy when one is not enough. Those two properties - **résilience**
+and **scalabilité** - are the reason an orchestrator exists, and `k8s/` is where
+they are written down: a Deployment, a Service, three probes, resource requests
+and limits, and a HorizontalPodAutoscaler.
+
+Nothing in `k8s/` is generated and nothing in it is a chart. The Helm material
+in `charts/` is a separate exercise; this is the plain-YAML layer underneath it,
+which is the layer worth being able to read.
+
+```
+k8s/
+  kind-cluster.yaml            The local cluster: one control plane, two workers.
+  deployment.yaml              The pods, the probes, the requests and limits.
+  service.yaml                 One stable address in front of N replicas.
+  hpa.yaml                     Replicas follow CPU.
+  metrics-server/              What the HPA needs, and does not get for free.
+  labs/readiness-failure.yaml  Out of service, still running.
+  labs/liveness-failure.yaml   Restarted.
+  labs/loadgen.yaml            Something to scale in response to.
+```
+
+> **Delete the cluster when you stop working.** It does not stop on its own, it
+> survives reboots, and it is invisible unless you go looking - there is no
+> window to close and nothing in `docker ps` that reads as "a Kubernetes
+> cluster". Idle, with one replica and metrics-server up, the three nodes hold
+> **about 1.9 GB**:
+>
+> ```bash
+> kind delete cluster --name ryvion   # the whole thing, in one command
+> kind get clusters                   # "No kind clusters found."
+> ```
+>
+> This is not tidiness. A later section of the course adds a monitoring stack to
+> the same cluster, and on a 8 GB laptop a forgotten cluster from last week is
+> the difference between that working and that swapping. Read [Teardown](#teardown)
+> now rather than when you get to it.
+
+### What you need
+
+`kubectl` and [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation),
+on top of the container engine the previous section already needed. kind runs a
+Kubernetes cluster as Docker containers, which is what makes this a laptop
+exercise: no cloud account, no cluster to pay for, and teardown is one command.
+
+```bash
+# macOS / Linux
+brew install kind kubectl
+# Windows
+winget install Kubernetes.kind Kubernetes.kubectl
+# any platform, no package manager - a single binary
+# https://kind.sigs.k8s.io/docs/user/quick-start/#installing-from-release-binaries
+```
+
+Docker Desktop and Rancher Desktop both ship a `kubectl`, so you may already
+have one. `kubectl version --client` is the check.
+
+### From an image on your laptop to a service in a cluster
+
+```bash
+# 0. Build the image first - the previous section, in full. The cluster deploys
+#    the image you built; there is no registry in this story at all.
+docker build -f serving/Dockerfile -t ryvion-mlops-serving:local .
+
+# 1. Create the cluster. Two or three minutes the first time, while the node
+#    image downloads; seconds afterwards.
+kind create cluster --config k8s/kind-cluster.yaml
+kubectl config use-context kind-ryvion
+kubectl get nodes
+
+# 2. Put the image INTO the cluster. This step is the one everybody forgets.
+kind load docker-image ryvion-mlops-serving:local --name ryvion
+
+# 3. Deploy.
+kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
+kubectl rollout status deploy/ryvion-serving
+
+# 4. Call it, from outside the cluster, on the port kind published.
+curl -s localhost:30080/healthz
+curl -s localhost:30080/readyz
+curl -s -X POST localhost:30080/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"records":[{"cylinders":8,"displacement":307.0,"horsepower":"130.0",
+       "weight":3504,"acceleration":12.0,"model year":70,"origin":1,
+       "car name":"chevrolet chevelle malibu"}]}'
+# {"predictions":[14.975242297915628]}
+```
+
+**Step 2 is not optional and its absence does not look like its absence.** A
+kind cluster's nodes are containers with their own image stores; they cannot see
+your Docker daemon's images. Skip the load and the pods sit in `ErrImagePull`
+while the kubelet tries to fetch `docker.io/library/ryvion-mlops-serving:local`
+from a registry that has never heard of it. Rebuild the image and you must load
+it again - the cluster keeps the copy it was given, so a stale deployment that
+"ignores your changes" is almost always a forgotten `kind load`.
+
+The Deployment sets `imagePullPolicy: IfNotPresent` for the same reason. With
+`Always`, the kubelet would go to a registry even for an image it already has.
+
+### Résilience: the two probes do different things
+
+There are three probes in `k8s/deployment.yaml` and the difference between two
+of them is the whole lesson.
+
+| Probe | Points at | On failure |
+|---|---|---|
+| `startupProbe` | `/healthz` | Nothing yet - it suspends liveness while the model loads. |
+| `livenessProbe` | `/healthz` | **Restarts the container.** |
+| `readinessProbe` | `/readyz` | **Removes the pod from the Service. Does not restart it.** |
+
+`/healthz` deliberately knows nothing about the model, and `/readyz` is the one
+that reports it. That pairing is not decoration. A missing model is not fixed by
+a restart - the container comes back and fails identically - so it must fail
+*readiness*, which routes traffic away and leaves the container running for you
+to interrogate. A wedged process is not fixed by routing around it, so it must
+fail *liveness*, which restarts it.
+
+Both behaviours are in `k8s/labs/`, and both are worth causing on purpose.
+
+**Readiness failure - out of service, still running.** The same image, told to
+load a model from a path that has none:
+
+```bash
+kubectl apply -f k8s/labs/readiness-failure.yaml
+kubectl get pods -l lab=readiness-failure -w
+# NAME                              READY   STATUS    RESTARTS   AGE
+# ryvion-nomodel-7469f67d6d-qfnx8   0/1     Running   0          2m22s
+```
+
+`Running`, `0/1`, and `RESTARTS 0` - and it stays that way for as long as you
+watch. The pod is in the EndpointSlice as `ready: false`, so kube-proxy sends it
+nothing:
+
+```bash
+kubectl get endpointslices -l kubernetes.io/service-name=ryvion-nomodel -o yaml | grep -A4 addresses
+#   - addresses:
+#     - 10.244.2.7
+#     conditions:
+#       ready: false
+#       serving: false
+```
+
+The container is healthy; only the model is missing, and because the container
+was left alive you can ask it so:
+
+```bash
+kubectl exec deploy/ryvion-nomodel -- python -c \
+  "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read())"
+# b'{"status":"ok"}'
+```
+
+while `/readyz` answers `503` with `could not load a model from
+/tmp/there-is-no-model-here`. Note what `kubectl describe pod` gives you and
+what it does not: `Readiness probe failed: HTTP probe failed with statuscode:
+503`, the status code and nothing else. The reason lives in the response body,
+and you can only go and get it because nothing restarted the pod.
+
+```bash
+kubectl delete -f k8s/labs/readiness-failure.yaml
+```
+
+**Liveness failure - restarted, over and over.** This one patches the real
+Deployment so that the liveness probe points at a path that does not exist:
+
+```bash
+kubectl patch deployment ryvion-serving --patch-file k8s/labs/liveness-failure.yaml
+kubectl get pods -l app.kubernetes.io/name=ryvion-serving -w
+# ryvion-serving-5df4745c65-tnqpw   1/1   Running            0             18s
+# ryvion-serving-5df4745c65-tnqpw   0/1   Running            1 (2s ago)    33s
+# ryvion-serving-5df4745c65-tnqpw   0/1   Running            2 (2s ago)    63s
+# ryvion-serving-5df4745c65-tnqpw   0/1   Running            3 (2s ago)    93s
+# ryvion-serving-5df4745c65-tnqpw   0/1   Running            4 (3s ago)    2m4s
+# ryvion-serving-5df4745c65-tnqpw   0/1   CrashLoopBackOff   4 (3s ago)    2m34s
+
+kubectl describe pod -l app.kubernetes.io/name=ryvion-serving | grep -E "Unhealthy|Killing"
+# Warning  Unhealthy  Liveness probe failed: HTTP probe failed with statuscode: 404
+# Normal   Killing    Container serving failed liveness probe, will be restarted
+
+kubectl apply -f k8s/deployment.yaml    # undo it
+```
+
+The application never crashed. `/healthz` answered `200` the entire time; the
+*probe* was wrong, and a wrong liveness probe restarts a working service until
+it is declared to be in a crash loop. That failure mode looks exactly like a
+broken application in every dashboard you will ever see, which is the argument
+for keeping `/healthz` free of anything a restart cannot fix.
+
+Note also the flicker in the `READY` column. Every restart takes the pod out of
+the Service for as long as it takes to come back, so self-healing is not free on
+a single replica - which is the argument for the next section.
+
+### Requests and limits
+
+```yaml
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+```
+
+Two different words for two different mechanisms, and the asymmetry between the
+CPU pair and the memory pair is deliberate:
+
+- A **request** is what the *scheduler* reserves. A node needs this much
+  unclaimed before a replica can land on it. It is also the denominator the
+  autoscaler divides by - a Deployment with no CPU request cannot be autoscaled
+  on CPU at all, and the HPA will report `<unknown>/60%` forever.
+- A **limit** is what the *kernel* enforces. CPU over the limit is throttled;
+  memory over the limit is an OOM kill. So CPU is set generously above its
+  request - a busy pod is allowed to burst into idle capacity, and that burst is
+  exactly what the autoscaler measures - while memory sits close to what the
+  process actually uses. `kubectl top pods` reports an idle replica at about
+  `175Mi`, which is where `256Mi` and `512Mi` came from rather than from
+  a round number that looked safe.
+
+### Scalabilité: autoscaling, and the part nobody warns you about
+
+Apply the HPA on a fresh kind cluster and it does nothing:
+
+```bash
+kubectl get hpa
+# NAME             REFERENCE                   TARGETS              MINPODS   MAXPODS   REPLICAS
+# ryvion-serving   Deployment/ryvion-serving   cpu: <unknown>/60%   1         6         1
+kubectl top pods
+# error: Metrics API not available
+```
+
+**A HorizontalPodAutoscaler cannot see CPU by itself.** It reads the metrics API
+(`metrics.k8s.io`), and something has to serve that API. Managed clusters have
+`metrics-server` pre-installed and never mention it; kind does not have it at
+all. There is no error - just `<unknown>`, indefinitely.
+
+Installing it is one command, and then there is a second trap behind the first:
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+kubectl -n kube-system logs deploy/metrics-server | grep scrape
+# E0821 15:08:51 scraper.go:149] "Failed to scrape node" err="Get
+# \"https://172.24.0.3:10250/metrics/resource\": tls: failed to verify certificate:
+# x509: cannot validate certificate for 172.24.0.3 because it doesn't contain any
+# IP SANs" node="ryvion-worker"
+```
+
+metrics-server verifies the certificate each kubelet presents. kind's kubelets
+serve **self-signed** certificates that no cluster CA has signed, so every
+scrape fails, the pod sits at `0/1 Ready` with `no metrics to serve`, and
+`kubectl top` still errors. Use the kustomization in this repository instead,
+which pins the version and patches in the one flag that resolves it:
+
+```bash
+kubectl apply -k k8s/metrics-server
+kubectl -n kube-system rollout status deploy/metrics-server
+kubectl top pods
+# NAME                              CPU(cores)   MEMORY(bytes)
+# ryvion-serving-5b9fbbf6c9-hgq7l   2m           174Mi
+```
+
+The flag is `--kubelet-insecure-tls`, it is patched in visibly rather than
+hidden behind an install switch, and `k8s/metrics-server/kustomization.yaml`
+spells out what it costs: metrics-server will then believe anything answering on
+the kubelet port. It is the documented answer for kind and the wrong answer in
+production, where the fix is to let the cluster CA sign kubelet serving
+certificates.
+
+**Now drive load.** `k8s/labs/loadgen.yaml` runs four clients posting batches at
+the Service - using the serving image itself, because it is already on the nodes
+and a lab that fails at `ImagePullBackOff` teaches nothing.
+
+```bash
+kubectl apply -f k8s/labs/loadgen.yaml
+
+# In two more terminals - the HPA's own view, and the pods it is creating:
+kubectl get hpa ryvion-serving -w
+kubectl get pods -l app.kubernetes.io/name=ryvion-serving -w
+```
+
+The transcripts below are those two watches interleaved: the HPA's
+`TARGETS MINPODS MAXPODS REPLICAS` columns, then how many of the pods that
+exist are Ready.
+
+```
+17:35:06  cpu: 35%/60%    1  6  1     ready=1/1
+17:35:16  cpu: 87%/60%    1  6  1     ready=1/2
+17:35:27  cpu: 501%/60%   1  6  2     ready=2/4
+17:35:48  cpu: 501%/60%   1  6  4     ready=4/6
+17:35:58  cpu: 421%/60%   1  6  6     ready=6/6
+```
+
+One replica pinned at its 500m limit is 500% of its 100m request, so
+`desired = ceil(1 x 500/60) = 9`, capped at `maxReplicas: 6`. The climb is
+`1 -> 2 -> 4 -> 6` because the scale-up policy allows +100% every 15 seconds.
+Note the lag at the start: metrics are collected every 15s and the HPA
+reconciles every 15s, so load takes about half a minute to become replicas. An
+autoscaler is a capacity tool, not a latency tool.
+
+The new replicas land on both workers, which is what the two-worker cluster and
+the `topologySpreadConstraints` in `deployment.yaml` are for - a service whose
+six replicas share one node has not bought much résilience:
+
+```bash
+kubectl get pods -l app.kubernetes.io/name=ryvion-serving -o wide
+# ryvion-serving-...-2kk4h   1/1   Running   10.244.1.7   ryvion-worker2
+# ryvion-serving-...-bhsrm   1/1   Running   10.244.2.5   ryvion-worker
+# ryvion-serving-...-jc4q6   1/1   Running   10.244.1.5   ryvion-worker2
+# ryvion-serving-...-vb8vg   1/1   Running   10.244.2.6   ryvion-worker
+```
+
+**Then take the load away**, and watch the asymmetry:
+
+```bash
+kubectl delete -f k8s/labs/loadgen.yaml
+```
+
+```
+17:38:49  cpu: 162%/60%   1  6  6     ready=6/6
+17:38:59  cpu: 2%/60%     1  6  6     ready=6/6
+17:39:41  cpu: 2%/60%     1  6  6     ready=3/3
+17:40:02  cpu: 2%/60%     1  6  3     ready=3/3
+17:40:33  cpu: 2%/60%     1  6  1     ready=1/1
+```
+
+CPU collapses immediately; replicas do not. `scaleDown.stabilizationWindowSeconds`
+holds the highest recent recommendation for 60 seconds first, so a lull cannot
+throw away capacity that a spike is about to need again, and then the
+50%-per-30s policy steps down `6 -> 3 -> 1` rather than dropping straight to the
+floor. The upstream default for that window is **300 seconds**; `k8s/hpa.yaml`
+shortens it to 60 so the second half of this demonstration fits inside a class,
+and says so in a comment.
+
+`kubectl describe hpa ryvion-serving` has the whole story in its events:
+
+```
+Normal  SuccessfulRescale  15m  New size: 2; reason: cpu resource utilization (percentage of request) above target
+Normal  SuccessfulRescale  14m  New size: 4; reason: cpu resource utilization (percentage of request) above target
+Normal  SuccessfulRescale  14m  New size: 6; reason: cpu resource utilization (percentage of request) above target
+Normal  SuccessfulRescale  10m  New size: 3; reason: All metrics below target
+Normal  SuccessfulRescale  10m  New size: 1; reason: All metrics below target
+```
+
+One thing the HPA does *not* do: it will not undo `replicas:` in
+`deployment.yaml`. Both fields own the replica count, and whichever was written
+last wins - which is why re-applying the Deployment during a scale-up snaps it
+back to 1 and the autoscaler then has to climb again.
+
+### Teardown
+
+**Do this every time you stop working, not once at the end of the course.**
+
+A kind cluster is three long-running Docker containers. Nothing stops them: not
+closing your terminal, not logging out, not rebooting - the Docker daemon starts
+them again. They do not appear in any menu, and in `docker ps` they look like
+three ordinary containers with unmemorable names. The only thing that tells you
+one is running is asking:
+
+```bash
+kind get clusters
+```
+
+Measured on the cluster this section builds - three nodes, one serving replica,
+metrics-server - the resident cost is about **1.9 GB**:
+
+```
+ryvion-control-plane   967.1MiB
+ryvion-worker          565.4MiB
+ryvion-worker2         388.7MiB
+```
+
+During the autoscaling lab, with six replicas and four load generators, it is
+considerably more. Deleting the cluster takes all of it back, along with the
+Deployment, the Service, the HPA, metrics-server and the loaded image:
+
+```bash
+kind delete cluster --name ryvion
+kind get clusters
+# No kind clusters found.
+```
+
+Run the second command. `kind delete cluster` without `--name` deletes a cluster
+called `kind`, not this one, and reports success while `ryvion` keeps running -
+which is the single easiest way to believe you have cleaned up when you have
+not.
+
+The built image stays in your local Docker daemon, which is usually what you
+want between sessions. `docker rmi ryvion-mlops-serving:local` reclaims its
+1.4 GB when you are finished with it for good.
+
+Why this section is emphatic: a later part of the course installs Prometheus and
+Grafana onto this same cluster, and that is the memory ceiling of the whole
+module on a 8 GB laptop. A cluster left running from a previous session is the
+usual reason it does not fit.
+
 ## Repository layout
 
 ```
 automobile/            The domain package.
   entrypoints/         One argparse shell per pipeline step. No domain logic.
 serving/               The hand-built serving application and its Dockerfile.
+k8s/                   Plain Kubernetes manifests, and the probe/autoscaling labs.
 data/                  The seed dataset, committed. 398 rows, six of them defective,
                        plus a deliberately corrupt copy for the contract to refuse.
 environments/          The three dependency manifests, and the lockfile.

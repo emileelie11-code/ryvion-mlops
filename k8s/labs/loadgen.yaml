@@ -1,0 +1,154 @@
+# Lab: drive load, watch the autoscaler react, stop, watch it give the capacity back.
+#
+# Requires the metrics API. Install it first, or the HPA will report <unknown>:
+#
+#     kubectl apply -k k8s/metrics-server
+#     kubectl -n kube-system rollout status deploy/metrics-server
+#     kubectl top pods                    # must print numbers, not an error
+#
+# Then, in three terminals:
+#
+#     kubectl get hpa ryvion-serving -w
+#     kubectl get pods -l app.kubernetes.io/name=ryvion-serving -w
+#     kubectl apply -f k8s/labs/loadgen.yaml
+#
+# Scale-up begins within about half a minute - metrics-server collects every 15
+# seconds and the HPA controller reconciles every 15 seconds, so the delay
+# between load arriving and replicas appearing is two sampling intervals plus
+# however long the image takes to start. That delay is not a defect to be tuned
+# away; it is the reason an autoscaler is a capacity tool and not a latency tool.
+#
+# Turn the load off and watch the other half:
+#
+#     kubectl delete -f k8s/labs/loadgen.yaml
+#
+# CPU falls immediately, but replicas do not - `scaleDown.stabilizationWindowSeconds`
+# in hpa.yaml holds them for 60 seconds first, and then the 50%-per-30s policy
+# steps them down rather than dropping straight to one. Watching that asymmetry
+# is the point of doing this in both directions.
+#
+# The load generator runs the SERVING IMAGE. Not because it is a natural load
+# tool, but because it is already on the nodes: a kind cluster on a laptop may
+# have no route to a registry, and a lab that fails at `ImagePullBackOff` on a
+# busybox teaches nothing. The client and the server sharing an image is an
+# accident of convenience, and worth saying out loud so nobody infers a pattern.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ryvion-loadgen
+  labels:
+    lab: loadgen
+data:
+  load.py: |
+    """Post batches at the Service, as fast as one thread can, forever.
+
+    Deliberately dumb. It reports nothing, retries nothing and measures
+    nothing - the autoscaler is the instrument in this experiment, and
+    `kubectl get hpa -w` is the readout. A real load test belongs in a real
+    load tool.
+
+    The record is one row of the automobile dataset, raw, sentinel and all.
+    BATCH multiplies it: the per-request cost is mostly request parsing and
+    DataFrame construction rather than the model itself, so a batch of a few
+    hundred is what turns a trickle of requests into measurable CPU.
+    """
+    import json
+    import os
+    import urllib.error
+    import urllib.request
+
+    TARGET = os.environ.get("TARGET", "http://ryvion-serving/predict")
+    BATCH = int(os.environ.get("BATCH", "200"))
+
+    RECORD = {
+        "cylinders": 8,
+        "displacement": 307.0,
+        "horsepower": "130.0",
+        "weight": 3504,
+        "acceleration": 12.0,
+        "model year": 70,
+        "origin": 1,
+        "car name": "chevrolet chevelle malibu",
+    }
+
+    payload = json.dumps({"records": [RECORD] * BATCH}).encode()
+
+    while True:
+        request = urllib.request.Request(
+            TARGET, data=payload, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response.read()
+        except (urllib.error.URLError, OSError, TimeoutError):
+            # A replica rolling, a probe cycling, a DNS answer arriving late -
+            # all expected while the thing under test is changing shape.
+            pass
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ryvion-loadgen
+  labels:
+    lab: loadgen
+spec:
+  # Scale this up for more load: `kubectl scale deploy/ryvion-loadgen --replicas=8`.
+  # Each replica is one synchronous client, so the offered load is roughly
+  # linear in this number - which makes it a usable dial for showing the
+  # autoscaler settle at different replica counts rather than always pinning to
+  # maxReplicas.
+  replicas: 4
+  selector:
+    matchLabels:
+      lab: loadgen
+  template:
+    metadata:
+      labels:
+        lab: loadgen
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loadgen
+          image: ryvion-mlops-serving:local
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/etc/loadgen/load.py"]
+          env:
+            # The Service name resolves inside the cluster through CoreDNS.
+            # No IP, no NodePort, no port-forward: this is what a Service is for.
+            - name: TARGET
+              value: http://ryvion-serving/predict
+            - name: BATCH
+              value: "200"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: script
+              mountPath: /etc/loadgen
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # The generator is capped so that it competes for CPU with the thing
+          # it is testing rather than starving it. On a two-node laptop cluster
+          # the load generator and the service share the same cores.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: script
+          configMap:
+            name: ryvion-loadgen
+        - name: tmp
+          emptyDir: {}

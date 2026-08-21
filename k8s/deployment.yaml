@@ -1,0 +1,175 @@
+# The serving container, on Kubernetes.
+#
+# This is the same image the Dockerfile builds and `docker run` runs. Nothing
+# about it changes here - what changes is who is responsible for keeping it
+# alive, and this file is where that responsibility is written down.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ryvion-serving
+  labels:
+    app.kubernetes.io/name: ryvion-serving
+    app.kubernetes.io/part-of: ryvion-mlops
+spec:
+  # One replica, and then the HorizontalPodAutoscaler in hpa.yaml takes this
+  # field over. Leaving it at 1 rather than deleting it matters: once an HPA is
+  # attached, `kubectl apply` on this file would otherwise reset the replica
+  # count on every deploy and undo whatever the autoscaler had decided.
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ryvion-serving
+
+  # Rolling, and deliberately conservative: never fewer than the current number
+  # of ready pods, at most one extra during the roll. Combined with the
+  # readiness probe below, a new replica takes no traffic until its model is
+  # loaded, so a deploy of a broken image cannot take the service down - the old
+  # pods stay in the Service because the new ones never become Ready.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ryvion-serving
+        app.kubernetes.io/part-of: ryvion-mlops
+    spec:
+      # Spread replicas across nodes where possible. ScheduleAnyway rather than
+      # DoNotSchedule: on a two-node laptop cluster a hard constraint would leave
+      # the third replica Pending during a scale-up, which is a worse lesson than
+      # the one this is here to teach.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ryvion-serving
+
+      securityContext:
+        # The image declares USER 10001:10001 numerically for exactly this
+        # reason: Kubernetes cannot resolve a user *name* against an image, so
+        # runAsNonRoot on an image with `USER serving` would refuse to start.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: serving
+          image: ryvion-mlops-serving:local
+
+          # The image has no registry behind it - it was built on this laptop
+          # and pushed into the cluster's nodes with `kind load docker-image`.
+          # IfNotPresent is what stops the kubelet trying to pull
+          # `docker.io/library/ryvion-mlops-serving:local` and failing with
+          # ImagePullBackOff. This is the single most common way this lab goes
+          # wrong, and it is worth causing on purpose once.
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # The service writes nothing to disk, so the root filesystem is
+          # read-only. MLflow is the exception and not really an exception: it
+          # resolves a default file store relative to the working directory on
+          # import, and the image points MLFLOW_TRACKING_URI at /tmp so that
+          # attempt lands somewhere writable. This is that somewhere.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          # --- The three probes, and why there are three ---------------------
+          #
+          # startupProbe: loading an MLflow model means importing pandas,
+          # scikit-learn and mlflow and unpickling a fitted pipeline, which is
+          # slow. Without this, the liveness probe below would start counting
+          # against a process that is doing exactly what it should, and kill it.
+          # A startup probe suspends liveness until it first succeeds, so slow
+          # startup and a hung process stop being the same signal.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 45 # up to 90s to come up
+
+          # livenessProbe -> /healthz. Failing this RESTARTS the container, so
+          # it must only fail when a restart is the right answer. /healthz says
+          # nothing about the model on purpose: it answers 200 as long as the
+          # process is up and serving requests. If it stops answering, the
+          # process is wedged, and restarting it is the correct response.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3 # ~30s of silence before a restart
+
+          # readinessProbe -> /readyz. Failing this REMOVES THE POD FROM THE
+          # SERVICE and does not restart it. /readyz answers 503 until a model
+          # is loaded. That is the correct pairing: a missing model is not fixed
+          # by a restart - the container would come back and fail identically -
+          # so the orchestrator should route around it and leave it running for
+          # someone to ask questions of.
+          #
+          # Point these two at each other's endpoints and both lessons invert:
+          # liveness on /readyz turns a missing model into a crash loop, and
+          # readiness on /healthz sends traffic to a pod that cannot serve it.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2 # out of service after ~10s
+            successThreshold: 1
+
+          # --- Requests and limits -------------------------------------------
+          #
+          # requests are what the SCHEDULER reserves: a node must have this much
+          # unused before a replica lands on it. They are also the denominator
+          # the HorizontalPodAutoscaler divides by, so a Deployment with no CPU
+          # request cannot be autoscaled on CPU at all - the HPA reports
+          # <unknown>/60% forever. That is not a detail, it is the reason this
+          # block has to exist before hpa.yaml means anything.
+          #
+          # limits are what the KERNEL enforces: CPU above the limit is
+          # throttled, memory above it is an OOM kill. Hence the asymmetry
+          # below. CPU is compressible, so the limit is set well above the
+          # request and a busy pod is allowed to burst into idle capacity - that
+          # burst is what the autoscaler observes. Memory is not compressible,
+          # so its limit sits close to measured usage plus headroom: an idle
+          # replica sits at roughly 175Mi (mlflow, pandas, scikit-learn and the
+          # unpickled pipeline), which is what these numbers are derived from
+          # rather than guessed at.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # uvicorn is PID 1 and handles SIGTERM itself, so a pod gets a real
+      # graceful shutdown rather than being killed after the grace period.
+      terminationGracePeriodSeconds: 20

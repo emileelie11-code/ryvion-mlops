@@ -1,0 +1,66 @@
+# Scalabilité: replicas follow load, without anyone watching.
+#
+# This object does nothing at all until something is publishing pod CPU metrics.
+# A stock kind cluster is not - `kubectl top pods` errors and this HPA reports
+# `<unknown>/60%` indefinitely. See k8s/metrics-server/ for the fix and for why
+# the fix needs a flag that would be alarming anywhere else.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ryvion-serving
+  labels:
+    app.kubernetes.io/name: ryvion-serving
+    app.kubernetes.io/part-of: ryvion-mlops
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ryvion-serving
+
+  minReplicas: 1
+  maxReplicas: 6
+
+  metrics:
+    # averageUtilization is a percentage of the *request*, not of the limit and
+    # not of the node. The Deployment requests 100m, so 60% means the autoscaler
+    # aims to keep each pod averaging 60 millicores. Because the limit is 500m,
+    # a single pod can reach 500% utilisation before it is throttled - which is
+    # what gives the controller a large, unambiguous signal to react to instead
+    # of a number hovering near the target.
+    #
+    # The arithmetic is worth doing out loud once, because it is the whole
+    # algorithm: desired = ceil(current * currentUtilisation / targetUtilisation).
+    # One pod pinned at its 500m limit is 500%, so desired = ceil(1 * 500/60) = 9,
+    # capped to maxReplicas.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+  behavior:
+    scaleUp:
+      # React immediately. The default is already 0, written out because the
+      # asymmetry with scaleDown below is the point.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+      selectPolicy: Max
+
+    scaleDown:
+      # The default here is 300 seconds - five minutes of the highest recent
+      # recommendation before anything is removed, so that a lull does not throw
+      # away capacity a spike is about to need again. That is the right default
+      # in production and the wrong one in a classroom, where nobody watches a
+      # terminal for five minutes. 60s is short enough to demonstrate and long
+      # enough to still show what stabilisation is for: scale-down lags
+      # scale-up, on purpose, and the lag is a tunable rather than a bug.
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+      selectPolicy: Max

@@ -1,0 +1,59 @@
+# The trap this slice exists to spring in private rather than in front of a class.
+#
+#     kubectl apply -k k8s/metrics-server
+#
+# A HorizontalPodAutoscaler cannot see CPU. It asks the metrics API
+# (metrics.k8s.io), and something has to serve that API. On a managed cluster
+# the platform has already installed metrics-server and you never learn that it
+# is a separate component; on kind, minikube-without-the-addon, or any cluster
+# you built yourself, it is simply absent. The symptom is not an error - it is
+# `kubectl top pods` replying "Metrics API not available" and an HPA sitting at
+# `<unknown>/60%` for as long as you are willing to watch it.
+#
+# Installing it upstream is one line. The second thing here is the part worth
+# reading.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Pinned, like every other dependency in this repository. `latest/download`
+  # would work today and is exactly the habit that killed this repository's
+  # predecessor.
+  - https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml
+
+patches:
+  - target:
+      kind: Deployment
+      name: metrics-server
+      namespace: kube-system
+    patch: |-
+      # --- Why --kubelet-insecure-tls is needed, and what it costs ------------
+      #
+      # metrics-server scrapes each kubelet over HTTPS and verifies the
+      # certificate the kubelet presents. In a cluster with a properly
+      # configured signer, those serving certificates are issued by the cluster
+      # CA and verification succeeds.
+      #
+      # kind's kubelets serve a SELF-SIGNED certificate. Nothing signs it, so
+      # metrics-server cannot chain it to any authority it trusts, and every
+      # scrape fails with:
+      #
+      #     x509: cannot validate certificate for 172.24.0.3 because it doesn't
+      #     contain any IP SANs
+      #
+      # The pod is Running - it starts fine, it just never collects anything -
+      # and sits at 0/1 Ready with "Failed probe ... no metrics to serve" in its
+      # log. `kubectl get deploy` alone will not tell you why.
+      #
+      # This flag tells metrics-server to skip that verification. It is the
+      # documented answer for kind and it is a genuinely bad idea in production:
+      # it means metrics-server will believe any endpoint that answers on the
+      # kubelet port, so anything that can occupy that address can feed the
+      # autoscaler invented numbers. The real fix in a real cluster is to enable
+      # kubelet serving certificate rotation and let the cluster CA sign them.
+      #
+      # It is patched in here, visibly, rather than hidden behind a --set on an
+      # install command, precisely so the trade-off is on the page.
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --kubelet-insecure-tls

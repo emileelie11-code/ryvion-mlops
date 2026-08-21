@@ -1,0 +1,34 @@
+# The local Kubernetes cluster this course deploys to.
+#
+#     kind create cluster --config k8s/kind-cluster.yaml
+#
+# kind runs a whole cluster as Docker containers - one per node - which is what
+# makes the orchestration half of this course a laptop exercise rather than a
+# cloud account. No control plane to pay for, no credentials, and teardown is
+# `kind delete cluster --name ryvion`.
+#
+# Three nodes: a control plane and TWO workers. The second worker is not
+# padding. kind taints its control-plane node NoSchedule exactly as a real
+# cluster does, so a one-worker cluster has precisely one place to put a pod -
+# every replica lands on the same node, `kubectl get pods -o wide` has nothing
+# to say, and the topologySpreadConstraints in deployment.yaml are inert. With
+# two workers the scheduler has a choice, the spread constraint does something
+# observable, and `kubectl drain` becomes a demonstration rather than an outage.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ryvion
+
+nodes:
+  - role: control-plane
+    # kind gives each node container its own network namespace, so a NodePort is
+    # not reachable from the host unless the port is published the way any other
+    # container port is. This is the mapping that makes `curl localhost:30080`
+    # work; without it the Service exists and is simply unreachable, which is a
+    # confusing first ten minutes for anyone who has only used a managed cluster
+    # with a real load balancer in front of it.
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+  - role: worker
+  - role: worker

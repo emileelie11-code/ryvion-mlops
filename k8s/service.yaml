@@ -1,0 +1,35 @@
+# One stable address in front of however many replicas the autoscaler decided on.
+#
+# The Service is what makes the readiness probe mean something. Its membership is
+# not "every pod matching the selector" - it is every pod matching the selector
+# *that is Ready*. A pod whose readinessProbe is failing is removed from the
+# EndpointSlice behind this Service within seconds, still Running, still
+# inspectable, and receiving no traffic. `kubectl get endpointslices` is where
+# you watch that happen.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ryvion-serving
+  labels:
+    app.kubernetes.io/name: ryvion-serving
+    app.kubernetes.io/part-of: ryvion-mlops
+spec:
+  # NodePort rather than LoadBalancer, because a laptop has no cloud load
+  # balancer to allocate one from - a LoadBalancer Service on kind stays
+  # <pending> forever. 30080 is fixed rather than assigned so that it matches
+  # the extraPortMappings in kind-cluster.yaml, which is what publishes it to
+  # the host: with those two agreeing, `curl localhost:30080/healthz` works from
+  # outside the cluster.
+  #
+  # `kubectl port-forward svc/ryvion-serving 8000:80` is the alternative and
+  # needs no NodePort at all - but it forwards to ONE pod, so it is the wrong
+  # tool for watching a Service balance across replicas.
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: ryvion-serving
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080
+      protocol: TCP

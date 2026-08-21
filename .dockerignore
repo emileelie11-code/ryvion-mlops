@@ -49,6 +49,7 @@ notebooks
 data
 docs
 charts
+k8s
 .pipelines
 .claude
 .flake8
