@@ -1,0 +1,31 @@
+# Python 3.11 and the locked environment, in one step.
+#
+# Every job in the training pipeline needs the same interpreter and the same
+# pinned libraries, and repeating those four lines in four jobs would bury the
+# pipeline under its own setup. This is a *local* composite action - a directory
+# in this repository, not a marketplace action - so it needs no token, no
+# allow-list and no account, and it works unchanged on a fork.
+#
+# It installs the lockfile rather than the requirements file, for the same
+# reason ci.yml does: this repository exists because an unpinned scikit-learn
+# broke its predecessor.
+name: Python environment
+description: Set up Python 3.11 and install the locked development environment.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v7
+      with:
+        # 3.11 exactly - the version the training environment pins.
+        python-version: '3.11'
+        cache: pip
+        cache-dependency-path: environments/dev.lock.txt
+
+    - name: Install the locked environment
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -r environments/dev.lock.txt
+        python -m pip install -e . --no-deps

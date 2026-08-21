@@ -111,6 +111,11 @@ data breaks its contract, and `evaluate` exits **0** when it promotes the
 candidate and **1** when it rejects it, so a run stops before it reaches
 `register`.
 
+Those exit codes are the whole of the pipeline's control flow. `.github/workflows/pipeline.yml`
+chains the same four commands as four dependent jobs - see [The pipeline, as a
+CI workflow](#the-pipeline-as-a-ci-workflow) - and nothing in the entrypoints
+knows whether it is being run by CI or by you.
+
 ## The data contract
 
 `automobile/data_contract.py` holds every rule about this dataset behind one
@@ -120,16 +125,19 @@ command instead of a training run:
 
 ```bash
 python -m automobile.entrypoints.validate                 # the seed dataset: exits 0
-python -m automobile.entrypoints.validate --data broken.csv
+python -m automobile.entrypoints.validate --data data/auto-mpg-corrupt.csv
 ```
 
 ```
-FAIL  automobile-mpg data contract: 1 of 8 rules violated over 398 rows.
+FAIL  automobile-mpg data contract: 2 of 8 rules violated over 398 rows.
+
+horsepower_missing_count_is_the_documented_six [horsepower]
+    exactly 6 rows may have a missing 'horsepower' - the documented defect, neither grown nor cleaned away
 
 mpg_is_positive [mpg]
     every 'mpg' must be greater than zero
-    2 offending row(s): 3, 41
-    offending value(s): '-1.0'
+    1 offending row(s): 0
+    offending value(s): '-18.0'
 ```
 
 Every violation is reported in one pass, and a row-level rule names the rows.
@@ -172,6 +180,25 @@ file is the seed, and the asset version is what appears in a model's lineage.
 Source: <https://archive.ics.uci.edu/dataset/9/auto+mpg>, file `auto-mpg.data`
 (MD5 `b858f4580d0066c48e260dd3b96f1ed8`), converted to CSV with the header row
 the notebook uses. No value was changed.
+
+### `data/auto-mpg-corrupt.csv`
+
+The same file with exactly two cells changed, committed so that the data
+contract can be watched refusing something rather than only read about. Row
+numbers are the ones the report prints:
+
+| Row | Change | Rule it breaks |
+|---|---|---|
+| 0 | `mpg` `18.0` → `-18.0` | `mpg_is_positive` |
+| 3 | `horsepower` `150.0` → `?` | `horsepower_missing_count_is_the_documented_six` |
+
+Two defects, two rules, one pass - the second one being the interesting kind:
+a *seventh* `?` is not obviously wrong to a human reading the file, and it is
+caught only because the contract knows the documented number of holes is six.
+
+Nothing trains on it. It exists for `--data data/auto-mpg-corrupt.csv`, on a
+laptop or in the pipeline workflow, and it is the shortest honest answer to "how
+do I know the gate works?"
 
 ## The model artifact
 
@@ -315,7 +342,85 @@ hard-codes it.
 
 `mlflow ui --backend-store-uri sqlite:///mlflow.db` shows the runs, the gate
 tags and the registered versions together. To start over, delete `mlflow.db` and
-`mlartifacts/`.
+`mlruns/`.
+
+## The pipeline, as a CI workflow
+
+`.github/workflows/pipeline.yml` runs the same four commands, in the same order,
+on a machine that is not yours. It is triggered on every pull request, on every
+push to `main`, and by hand from the **Run workflow** button.
+
+```
+1. Validate the data  ->  2. Train the candidate  ->  3. Apply the quality gate  ->  4. Register
+```
+
+Four **jobs**, not four steps in one job - which means four runners and four
+empty filesystems. That is the expensive shape, and it was chosen on purpose:
+one job with four `run:` lines would share a disk and make the state problem
+disappear, and a student who only ever sees that learns that a pipeline is a
+shell script. A pipeline stage is a machine, and machines do not share disks.
+
+### How state moves between the stages
+
+The steps are not independent. `train` produces a run, `evaluate` reads that
+run's metrics and writes its verdict back onto it, and `register` reads both the
+verdict and the model. All of that lives in the tracking store - which, because
+the registry needs a database, is two things on disk:
+
+| | |
+|---|---|
+| `mlflow.db` | the runs, their metrics, the gate's tags, the registry |
+| `mlruns/` | the logged model artifacts themselves |
+
+So two things travel between the jobs, by different means, because they are
+different sizes:
+
+| What | Size | How |
+|---|---|---|
+| The run id | one string | a **job output** - `outputs:` on `train`, `needs.train.outputs.run_id` on the jobs after it |
+| The tracking store | a few megabytes | a **workflow artifact** - uploaded at the end of one job, downloaded at the start of the next |
+
+Each job uploads the store under its own name rather than overwriting one, so
+the run page carries three snapshots - `tracking-store-after-train`,
+`-after-evaluate`, `-after-register`. Download the last one, point
+`mlflow ui --backend-store-uri sqlite:///mlflow.db` at it, and you are looking at
+what CI produced.
+
+One sharp edge, stated rather than hidden: MLflow records each artifact's
+location in the database as an **absolute path**. Posting the store between
+runners works only because every job checks out to the same path on its runner.
+Move the checkout and the database points at nothing. That is what "state" costs,
+and it is why a real deployment puts the store on a server both jobs can reach
+instead of posting it between them.
+
+### Watching it refuse
+
+Both refusals are reachable from the **Run workflow** button, because a gate you
+have only read about is not a gate you believe in:
+
+| Inputs | What happens |
+|---|---|
+| `data: data/auto-mpg-corrupt.csv` | `validate` exits 1, job 1 fails, **training never starts** |
+| `seed_incumbent: true`, `min_improvement: 5` | `evaluate` exits 1, job 3 fails, **registration never runs** |
+
+`seed_incumbent` is there because the registry starts empty in every run: the
+first candidate has nothing to beat and is always promoted, so the gate's
+interesting half is otherwise unreachable in CI. Set, it runs
+train → evaluate → register once on the same data to put a version 1 in the
+registry, and *then* trains the candidate the gate has to judge. A margin of 5
+mean-squared-error is one no rerun of the same data can clear.
+
+### What the pull request shows
+
+Each job writes its step's own output - the identical text you get in a terminal
+- to the run's job summary, so the run's metrics and the gate's verdict are
+readable from the pull request's checks without opening a log. The commands are
+unchanged: the workflow types what the block under [What runs
+today](#what-runs-today) tells you to type, and nothing in the entrypoints knows
+it is running in CI.
+
+No secrets, no accounts, no service connections, no third-party actions. Fork the
+repository, open a pull request, and the pipeline runs.
 
 ## The serving container
 
@@ -444,10 +549,12 @@ both are read from the model, they keep working when the signature changes.
 automobile/            The domain package.
   entrypoints/         One argparse shell per pipeline step. No domain logic.
 serving/               The hand-built serving application and its Dockerfile.
-data/                  The seed dataset, committed. 398 rows, six of them defective.
+data/                  The seed dataset, committed. 398 rows, six of them defective,
+                       plus a deliberately corrupt copy for the contract to refuse.
 environments/          The three dependency manifests, and the lockfile.
 tests/                 Unit tests. No credentials, no network, no containers.
-.github/workflows/     GitHub Actions: the always-on quality gate.
+.github/workflows/     GitHub Actions: the always-on quality gate, and the pipeline.
+.github/actions/       One local composite action: Python and the locked environment.
 .pipelines/            Azure Pipelines: the definitions the course studies.
 charts/                Helm charts for the A/B deployment material.
 notebooks/             The exploratory notebook the course opens with.
@@ -482,10 +589,14 @@ lockfile with the command in its header, and commit both.
 
 ## Continuous integration - two systems, on purpose
 
-- **`.github/workflows/ci.yml`** is the always-on gate. It runs lint and unit
-  tests on every pull request and needs no setup at all: fork the repository,
-  open a pull request, and it runs. This is what gives coursework instant
-  feedback.
+- **`.github/workflows/ci.yml`** is the always-on gate on the *code*. It runs
+  lint and unit tests on every pull request and needs no setup at all: fork the
+  repository, open a pull request, and it runs. This is what gives coursework
+  instant feedback.
+- **`.github/workflows/pipeline.yml`** is the gate on the *model*: the four
+  pipeline steps as four dependent jobs, described under [The pipeline, as a CI
+  workflow](#the-pipeline-as-a-ci-workflow). Same triggers, same absence of
+  setup.
 - **`.pipelines/pr.yml`** is the same gate on the CI platform the module
   teaches, connected to a student's own organisation and their own fork. It is
   the artifact to read and extend, and it makes the split between code host and

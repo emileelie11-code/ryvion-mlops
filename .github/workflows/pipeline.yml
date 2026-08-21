@@ -1,0 +1,325 @@
+# The four-step training pipeline: validate -> train -> evaluate -> register.
+#
+# This is the second of the two CI definitions in this repository. ci.yml is the
+# always-on quality gate for the *code* - lint and unit tests. This one runs the
+# *pipeline*: the same four commands the README tells you to type, in the same
+# order, on a machine that is not yours.
+#
+# Four jobs, not four steps in one job
+# -----------------------------------
+# Each of the four steps is a job of its own, and each `needs:` the one before
+# it. That was a deliberate choice over the simpler shape - one job with four
+# `run:` steps - and it costs something, so it is worth saying what it buys.
+#
+# One job would share a filesystem, and the whole state problem below would
+# vanish. It would also hide the thing this repository is here to teach: a
+# pipeline stage is a machine, and machines do not share disks. A student who
+# only ever sees four `run:` lines learns that a pipeline is a shell script.
+#
+# So: four jobs, four runners, four empty filesystems.
+#
+# How state moves between the jobs
+# --------------------------------
+# The four steps are not independent. `train` produces a run; `evaluate` reads
+# that run's metrics and writes its verdict back onto it; `register` reads the
+# verdict and the model. All of that lives in the MLflow tracking store - and
+# the model registry needs a database behind it, so locally, and here, the store
+# is a SQLite file plus an artifact directory:
+#
+#     mlflow.db    the runs, the metrics, the gate's tags, the registry
+#     mlruns/      the logged model artifacts themselves
+#
+# Two things travel between jobs, and they travel by different means because
+# they are different sizes:
+#
+#   the run id      - one string - as a *job output*
+#                     (`outputs:` on the producing job, `needs.train.outputs.*`
+#                     on the consuming one).
+#   the store       - a few megabytes - as a *workflow artifact*, uploaded at
+#                     the end of one job and downloaded at the start of the
+#                     next.
+#
+# Each job uploads the store under a new name (`...-after-train`,
+# `...-after-evaluate`, `...-after-register`) rather than overwriting one name.
+# The pipeline's state is therefore visible as three snapshots on the run page:
+# you can download the store as it was when the gate saw it, and again after the
+# model was registered.
+#
+# The sharp edge, stated out loud: MLflow records each artifact's location in
+# the database as an *absolute* path. That works here only because every job in
+# a run checks out to the same path on its runner
+# (/home/runner/work/ryvion-mlops/ryvion-mlops), so the paths the database holds
+# are still correct on the next machine. Move the checkout, or hand the store to
+# a different operating system, and the database points at nothing. That is not
+# a trick of this workflow; it is what "state" costs, and it is the reason a
+# real deployment puts the store on a server both jobs can reach instead of
+# posting it between them.
+#
+# Nothing here needs a secret
+# ---------------------------
+# No credentials, no accounts, no service connections, no third-party actions.
+# Fork this repository, open a pull request, and the pipeline runs. The only
+# configuration is MLFLOW_TRACKING_URI below, and it names a file.
+#
+# Watching it refuse
+# ------------------
+# Both refusals are reachable from the "Run workflow" button, because a gate you
+# have only read about is not a gate you believe in:
+#
+#   data: data/auto-mpg-corrupt.csv
+#       validate exits 1, the job fails, and train never starts.
+#
+#   seed_incumbent: true, min_improvement: 5
+#       the registry starts empty in every run, so the first candidate has
+#       nothing to beat and is always promoted. Seeding an incumbent gives the
+#       gate something to compare against; a margin of 5 mean-squared-error is
+#       one no rerun of the same data can clear. evaluate exits 1, the job
+#       fails, and register never runs.
+name: Training pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      data:
+        description: 'Dataset to run the pipeline on'
+        default: 'data/auto-mpg.csv'
+        required: false
+      min_improvement:
+        description: "The gate's margin, in mean-squared-error units"
+        default: '0'
+        required: false
+      seed_incumbent:
+        description: 'Register a baseline first, so the gate has an incumbent'
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Named explicitly, because the default shell on Linux is `bash -e` without
+    # `pipefail` - and every step below pipes a command into `tee`. Without
+    # pipefail, `automobile-train | tee train.log` would report the exit code of
+    # `tee`, which always succeeds, and a failed training run would pass.
+    shell: bash
+
+env:
+  # The registry needs a database, so the whole pipeline points at the SQLite
+  # file the README documents rather than the ./mlruns file store that would be
+  # enough for training alone. It is a path, not a credential.
+  MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+  # `inputs` is empty on push and pull_request, so each of these falls back to
+  # the value that makes the pipeline the healthy one.
+  DATA: ${{ inputs.data || 'data/auto-mpg.csv' }}
+  MIN_IMPROVEMENT: ${{ inputs.min_improvement || '0' }}
+
+jobs:
+  validate:
+    name: 1. Validate the data
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-environment
+
+      - name: Check the dataset against its contract
+        # Exactly the command the README gives, with the dataset named. Exit 1
+        # means the contract was violated, exit 2 means the file could not be
+        # read at all, and either one fails this job - which is what stops the
+        # pipeline before a runner is spent on training.
+        run: python -m automobile.entrypoints.validate --data "$DATA" | tee validate.log
+
+      - name: Publish the contract's verdict
+        if: always()
+        run: |
+          {
+            echo "## 1. Validate"
+            echo
+            echo '```'
+            cat validate.log || echo '(the step produced no output)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  train:
+    name: 2. Train the candidate
+    needs: validate
+    runs-on: ubuntu-latest
+
+    outputs:
+      # The one piece of state small enough to travel as a string. Every step
+      # after this one is about *this* run.
+      run_id: ${{ steps.train.outputs.run_id }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-environment
+
+      - name: Establish an incumbent for the gate to compare against
+        # Demonstration scaffolding, and only reachable from the "Run workflow"
+        # button. The registry is empty at the start of every run, so the gate's
+        # interesting half - "is this candidate better than what is registered?"
+        # - is otherwise unreachable in CI, and "no incumbent promotes" is all
+        # anyone ever sees. This runs the same three commands a person would
+        # type, on the same data, to put a version 1 in the registry first.
+        if: inputs.seed_incumbent == true
+        run: |
+          python -m automobile.entrypoints.train --data "$DATA" --run-name baseline | tee baseline.log
+          baseline_run=$(sed -n 's/^run id: *//p' baseline.log | tail -1)
+          python -m automobile.entrypoints.evaluate --run-id "$baseline_run"
+          python -m automobile.entrypoints.register --run-id "$baseline_run"
+
+      - name: Fit the model and log the artifact
+        id: train
+        # The run id is read back off the step's own stdout - the same line a
+        # person reads off their terminal and pastes into the next command. It
+        # is put into $GITHUB_OUTPUT, which is how a job hands a value to the
+        # jobs that `needs:` it.
+        run: |
+          python -m automobile.entrypoints.train \
+            --data "$DATA" \
+            --run-name "ci-${{ github.run_id }}-${{ github.run_attempt }}" | tee train.log
+          run_id=$(sed -n 's/^run id: *//p' train.log | tail -1)
+          test -n "$run_id"  # a train step that logged no run id is a broken pipeline
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the run's metrics
+        if: always()
+        run: |
+          {
+            echo "## 2. Train"
+            echo
+            echo '```'
+            cat train.log || echo '(the step produced no output)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the tracking store to the evaluate job
+        uses: actions/upload-artifact@v7
+        with:
+          name: tracking-store-after-train
+          # The two halves of the store: the database, and the artifacts its
+          # rows point at.
+          path: |
+            mlflow.db
+            mlruns/
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+  evaluate:
+    name: 3. Apply the quality gate
+    needs: train
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-environment
+
+      - name: Restore the tracking store the train job produced
+        # Downloaded into the workspace root, which puts mlflow.db and mlruns/
+        # back exactly where the train job had them - and where the absolute
+        # paths inside the database still point.
+        uses: actions/download-artifact@v7
+        with:
+          name: tracking-store-after-train
+
+      - name: Promote or reject the candidate
+        # Exit 0 promotes, exit 1 rejects. A rejection fails this job, and the
+        # register job below never starts. The verdict is also written onto the
+        # run as a tag, which is what travels on to the register job.
+        run: |
+          python -m automobile.entrypoints.evaluate \
+            --run-id "${{ needs.train.outputs.run_id }}" \
+            --min-improvement "$MIN_IMPROVEMENT" | tee evaluate.log
+
+      - name: Publish the gate's verdict
+        if: always()
+        run: |
+          {
+            echo "## 3. Evaluate"
+            echo
+            echo '```'
+            cat evaluate.log || echo '(the step produced no output)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the tracking store to the register job
+        # The store has changed: the gate tagged its verdict onto the candidate
+        # run, and the register job refuses to proceed without reading it. This
+        # is why the store makes the return trip rather than the train job's
+        # copy being reused.
+        uses: actions/upload-artifact@v7
+        with:
+          name: tracking-store-after-evaluate
+          path: |
+            mlflow.db
+            mlruns/
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+  register:
+    name: 4. Register the promoted model
+    needs: [train, evaluate]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-environment
+
+      - name: Restore the tracking store the gate left behind
+        uses: actions/download-artifact@v7
+        with:
+          name: tracking-store-after-evaluate
+
+      - name: Register the model against the data it was trained on
+        # The step reads the gate's tag itself and refuses anything not marked
+        # `promote`, including a run the gate has never seen. The `needs:` above
+        # already guarantees that here; the check exists because this is also a
+        # command a person can type in the wrong order.
+        run: |
+          python -m automobile.entrypoints.register \
+            --run-id "${{ needs.train.outputs.run_id }}" | tee register.log
+
+      - name: Publish the registered version
+        if: always()
+        run: |
+          {
+            echo "## 4. Register"
+            echo
+            echo '```'
+            cat register.log || echo '(the step produced no output)'
+            echo '```'
+            echo
+            echo "The version carries its lineage as tags - \`automobile.run_id\`,"
+            echo "\`automobile.data_source\` (\`$DATA\`) and \`automobile.rows\` - so the"
+            echo "model can say which data produced it. Download"
+            echo "\`tracking-store-after-register\` below and open it with:"
+            echo
+            echo '```'
+            echo 'mlflow ui --backend-store-uri sqlite:///mlflow.db'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the finished tracking store
+        # The pipeline's output. Nothing downstream consumes it in this
+        # repository - it is here so that a reader of the pull request can pull
+        # the registry onto their laptop and look at what the run produced.
+        uses: actions/upload-artifact@v7
+        with:
+          name: tracking-store-after-register
+          path: |
+            mlflow.db
+            mlruns/
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
