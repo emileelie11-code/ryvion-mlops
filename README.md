@@ -288,7 +288,7 @@ python -m automobile.entrypoints.train
 mlflow artifacts download --artifact-uri models:/<the model id> --dst-path serving/model
 
 # 3. Build, from the repository root - not from serving/. The Dockerfile needs
-#    the requirements manifest and the domain package, which live above it.
+#    the requirements manifest, which lives above it.
 docker build -f serving/Dockerfile -t ryvion-mlops-serving:local .
 
 # 4. Run it.
@@ -375,11 +375,15 @@ both are read from the model, they keep working when the signature changes.
   through its MLflow flavour and hands it a raw row. If you ever find a
   `to_numeric` or a `fillna` in `serving/`, the skew this repository exists to
   close has crept back in.
-- **The `automobile` package**, which is there for one specific reason: the
-  pipeline's first stage wraps a function from `automobile.model_factory`, and
-  cloudpickle stores that function as a *reference*. Without the module on the
-  path the artifact does not unpickle at all. The serving dependency manifest
-  still carries no training, testing or cloud package.
+- **None of this repository's own code beyond `serving/`.** The pipeline's first
+  stage wraps a function from `automobile.model_factory`, and cloudpickle stores
+  that function as a *reference*, so the artifact does not unpickle unless that
+  module is importable. This image used to copy the whole package in to satisfy
+  that. It no longer needs to: the train step logs the model with `code_paths`,
+  so the package travels *inside* the artifact and MLflow puts it on the path
+  when it loads. The dependency is the model's, so the model carries it - which
+  is also what lets the managed endpoint, which never sees this repository, load
+  the same artifact.
 - **`.dockerignore`** keeps the rest of the repository - your `.venv`, your
   `mlruns/`, the tests, the notebook - out of the build context entirely.
 

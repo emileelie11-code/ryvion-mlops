@@ -78,19 +78,19 @@ WORKDIR /app
 # nothing in this service ever writes to disk.
 COPY serving/__init__.py serving/loader.py serving/app.py /app/serving/
 
-# The domain package, because the model artifact refers to it by name. The
-# pipeline's first stage is a FunctionTransformer wrapping the model factory's
-# numeric coercion, and cloudpickle serialises that function as a *reference* -
-# so unpickling the model raises ModuleNotFoundError unless the module is
-# importable. This is code the model itself depends on rather than training
-# tooling: nothing here imports an entrypoint, and the serving requirements
-# manifest still carries no training, testing or cloud dependency.
-COPY automobile/ /app/automobile/
-
 # The exported MLflow model directory. It is a build input, not something
 # committed to the repository, so a build without it fails here - deliberately,
 # and with the path it was looking for. An image whose model arrives at run time
 # is an image Kubernetes cannot deploy on its own.
+#
+# It is also the only place the `automobile` package appears in this image. The
+# pipeline's first stage is a FunctionTransformer wrapping a function from that
+# package, and cloudpickle serialises it as a *reference* - so the model needs
+# the module to unpickle at all. This image used to copy the whole package in to
+# satisfy that. It no longer does: the train step logs the model with
+# `code_paths`, so the package travels inside the artifact and MLflow puts it on
+# the path itself. The image ships the model and nothing else of this repository
+# but the two serving modules above.
 ARG MODEL_DIR=serving/model
 COPY ${MODEL_DIR}/ /app/serving/model/
 

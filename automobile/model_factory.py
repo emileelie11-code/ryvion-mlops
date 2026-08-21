@@ -29,6 +29,8 @@ fits in milliseconds, it is explainable in one sentence, and this is a course
 about operations rather than modelling.
 """
 
+from pathlib import Path
+
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -37,6 +39,49 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 from automobile.dataset import NUMERIC_FEATURES
+
+#: The directory of the package the fitted model needs in order to unpickle.
+PACKAGE_ROOT = Path(__file__).resolve().parent
+
+#: The name that directory is imported - and, when it is installed at all,
+#: distributed - under. See :func:`model_code_paths` for why the model artifact
+#: must not name it as a dependency.
+PACKAGE_NAME = PACKAGE_ROOT.name
+
+
+def model_code_paths() -> list[str]:
+    """The source that must be logged *inside* the model artifact.
+
+    :func:`build_pipeline` puts :func:`coerce_to_numeric` into a
+    ``FunctionTransformer``, and cloudpickle serialises a module-level function
+    **by reference**: the artifact records the string
+    ``automobile.model_factory.coerce_to_numeric`` and nothing else. Unpickling
+    it therefore imports this package, and anywhere the source tree is absent
+    that import fails with ``ModuleNotFoundError: No module named 'automobile'``.
+
+    Passing this to ``log_model(..., code_paths=...)`` copies the package into
+    the artifact's own ``code/`` directory, which MLflow prepends to
+    ``sys.path`` before it unpickles. The dependency then travels *inside* the
+    model instead of being an unstated requirement of whatever environment
+    happens to load it - so the model loads in a no-code deployment that builds
+    its own container from the registry, and the serving image no longer has to
+    copy the package in as a workaround.
+
+    The whole package is carried rather than this one module, because
+    :mod:`automobile.dataset` is imported at module scope here and the import
+    is spelled absolutely; a single-file code path would resolve the transformer
+    and then fail one import deeper.
+
+    Carrying the code is only half of it. MLflow infers the artifact's pip
+    requirements by loading it and reading back what it imported, so when this
+    package happens to be installed in the training environment it is inferred
+    as a requirement too - and ``automobile==0.1.0`` is a name no index can
+    resolve. That is the same defect wearing different clothes: a dependency
+    stated as a name the loader is expected to find for itself. The train step
+    strikes it back out, using :data:`PACKAGE_NAME`, once the code is inside the
+    artifact and the requirement is therefore false as well as unmeetable.
+    """
+    return [str(PACKAGE_ROOT)]
 
 
 def coerce_to_numeric(frame: pd.DataFrame) -> pd.DataFrame:

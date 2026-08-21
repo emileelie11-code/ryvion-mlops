@@ -38,9 +38,12 @@ dist
 mlruns
 mlartifacts
 
-# Everything the serving image has no use for. Note that automobile/ is *not*
-# excluded: the pickled model refers to a function in it by name, so the module
-# has to be importable inside the image for the artifact to unpickle at all.
+# Everything the serving image has no use for - which now includes the domain
+# package itself. The pickled model does refer to a function in it by name, but
+# the train step logs the model with `code_paths`, so the copy the artifact
+# carries is the one that gets imported. Sending the checkout's copy as well
+# would put a second, unversioned one in the build context.
+automobile
 tests
 notebooks
 data

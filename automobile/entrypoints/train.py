@@ -8,6 +8,14 @@ apart. The artifact logged is a complete pipeline - preprocessing, scaling and
 estimator together - carrying its own fitted preprocessing statistics, a
 signature and an input example.
 
+The model is logged with ``code_paths``, so the package the fitted pipeline
+unpickles into travels *inside* the artifact rather than being an unstated
+requirement of whatever environment loads it - and the inferred pip requirement
+naming that same package is struck back out, because a model that carries its
+code must not also ask an index for it. See
+:func:`automobile.model_factory.model_code_paths` for why both halves are
+necessary.
+
 The tracking destination is read from the environment and never hard-coded: with
 nothing configured the run lands in a local file-based store and needs no cloud
 account at all.
@@ -24,11 +32,11 @@ from pathlib import Path
 import mlflow
 import mlflow.sklearn
 import pandas as pd
-from mlflow.models import infer_signature
+from mlflow.models import infer_signature, update_model_requirements
 
 from automobile import dataset
 from automobile.metrics import get_model_metrics
-from automobile.model_factory import build_pipeline
+from automobile.model_factory import PACKAGE_NAME, build_pipeline, model_code_paths
 from automobile.split import DEFAULT_TEST_SIZE, RANDOM_SEED, split_data
 from automobile.tracking import configure_tracking
 
@@ -138,7 +146,15 @@ def main(argv: list[str] | None = None) -> int:
             name=MODEL_ARTIFACT_NAME,
             signature=signature,
             input_example=input_example,
+            code_paths=model_code_paths(),
         )
+        # The package is inside the artifact now, so the artifact must stop
+        # claiming it as a pip dependency: MLflow infers requirements from what
+        # loading the model imports, and this package is not on any index. Left
+        # in, it would fail the environment build of any deployment that
+        # installs what the model asks for - which is exactly the class of
+        # failure code_paths is here to remove.
+        update_model_requirements(model_info.model_uri, "remove", [PACKAGE_NAME])
         run_id = run.info.run_id
 
     print(f"tracking uri:    {destination.uri}")
