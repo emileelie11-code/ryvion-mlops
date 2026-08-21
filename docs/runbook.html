@@ -1,0 +1,530 @@
+<title>Ryvion Local Runbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --paper:      #f4f6f7;
+    --surface:    #ffffff;
+    --surface-2:  #eef2f3;
+    --ink:        #161b21;
+    --ink-2:      #55636f;
+    --ink-3:      #7c8a95;
+    --rule:       #d9e0e4;
+    --rule-firm:  #b9c5cc;
+    --accent:     #0b6b75;
+    --accent-ink: #06484f;
+    --accent-bg:  #e2eff0;
+    --ok:         #1c7a45;
+    --ok-bg:      #e0f0e6;
+    --fail:       #b23b3b;
+    --fail-bg:    #f7e3e3;
+    --warn:       #8a6318;
+    --warn-bg:    #f6ecd8;
+    --term-bg:    #12181d;
+    --term-ink:   #cfd9e0;
+    --term-dim:   #7d8b96;
+
+    --step:  clamp(2rem, 1.4rem + 2.2vw, 2.9rem);
+    --h2:    clamp(1.45rem, 1.2rem + 1vw, 1.9rem);
+    --h3:    1.06rem;
+    --body:  1rem;
+    --small: 0.855rem;
+    --tiny:  0.755rem;
+
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #0f1418;
+      --surface:    #161d23;
+      --surface-2:  #1b242b;
+      --ink:        #e4eaef;
+      --ink-2:      #9aa8b4;
+      --ink-3:      #75838f;
+      --rule:       #253039;
+      --rule-firm:  #384954;
+      --accent:     #52c5d1;
+      --accent-ink: #8ddbe3;
+      --accent-bg:  #10333a;
+      --ok:         #4fba7c;
+      --ok-bg:      #13301f;
+      --fail:       #e8827f;
+      --fail-bg:    #381e1e;
+      --warn:       #d6a552;
+      --warn-bg:    #33280f;
+      --term-bg:    #0a0f13;
+      --term-ink:   #c6d2db;
+      --term-dim:   #6d7d89;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #0f1418;
+    --surface:    #161d23;
+    --surface-2:  #1b242b;
+    --ink:        #e4eaef;
+    --ink-2:      #9aa8b4;
+    --ink-3:      #75838f;
+    --rule:       #253039;
+    --rule-firm:  #384954;
+    --accent:     #52c5d1;
+    --accent-ink: #8ddbe3;
+    --accent-bg:  #10333a;
+    --ok:         #4fba7c;
+    --ok-bg:      #13301f;
+    --fail:       #e8827f;
+    --fail-bg:    #381e1e;
+    --warn:       #d6a552;
+    --warn-bg:    #33280f;
+    --term-bg:    #0a0f13;
+    --term-ink:   #c6d2db;
+    --term-dim:   #6d7d89;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--body);
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 50rem;
+    margin: 0 auto;
+    padding: clamp(1.75rem, 1rem + 3vw, 4rem) clamp(1.1rem, 0.6rem + 2vw, 2rem) 5rem;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .mast { display: flex; flex-direction: column; gap: 0.85rem; padding-bottom: 1.6rem; border-bottom: 2px solid var(--ink); }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: var(--tiny);
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  h1 {
+    font-family: var(--cond);
+    font-weight: 700;
+    font-size: clamp(2.2rem, 1.5rem + 3.2vw, 3.4rem);
+    line-height: 1.02;
+    letter-spacing: -0.015em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst { font-size: 1.09rem; color: var(--ink-2); margin: 0; max-width: 40rem; }
+
+  .facts { display: flex; flex-wrap: wrap; gap: 0 2rem; margin-top: 0.4rem; }
+  .fact { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.55rem 0; }
+  .fact dt { font-family: var(--mono); font-size: var(--tiny); letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-3); }
+  .fact dd { margin: 0; font-family: var(--mono); font-size: var(--small); color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* ---------- sections ---------- */
+
+  section { margin-top: 3.2rem; }
+  .part-label {
+    font-family: var(--mono);
+    font-size: var(--tiny);
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 0.3rem;
+  }
+  h2 {
+    font-family: var(--cond);
+    font-weight: 700;
+    font-size: var(--h2);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.45rem;
+    text-wrap: balance;
+  }
+  .section-note { color: var(--ink-2); margin: 0 0 1.6rem; max-width: 38rem; }
+
+  /* ---------- steps ---------- */
+
+  .step { display: grid; grid-template-columns: 2.9rem 1fr; gap: 0 1rem; padding: 1.5rem 0; border-top: 1px solid var(--rule); }
+  .step:first-of-type { border-top: 1px solid var(--rule-firm); }
+  .num {
+    font-family: var(--cond);
+    font-weight: 700;
+    font-size: 1.5rem;
+    line-height: 1.15;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    padding-top: 0.05rem;
+  }
+  .step-body { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+  h3 { font-family: var(--sans); font-weight: 600; font-size: var(--h3); margin: 0; line-height: 1.35; }
+  .step-body p { margin: 0; color: var(--ink-2); }
+  .step-body p.plain { color: var(--ink); }
+
+  /* ---------- code ---------- */
+
+  .cmd, .out {
+    font-family: var(--mono);
+    font-size: var(--small);
+    line-height: 1.62;
+    border-radius: 3px;
+    overflow-x: auto;
+    margin: 0;
+    padding: 0.8rem 0.95rem;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .cmd { background: var(--surface); border: 1px solid var(--rule-firm); color: var(--ink); }
+  .cmd .c { color: var(--ink-3); }
+  .out { background: var(--term-bg); color: var(--term-ink); border: 1px solid var(--term-bg); }
+  .out .d { color: var(--term-dim); }
+  .out .g { color: #6fce97; }
+  .out .r { color: #f08a86; }
+
+  .lbl {
+    font-family: var(--mono);
+    font-size: var(--tiny);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 -0.35rem;
+  }
+
+  /* ---------- checkpoint ---------- */
+
+  .ck { display: flex; gap: 0.6rem; align-items: baseline; font-size: var(--small); padding: 0.6rem 0.8rem; background: var(--accent-bg); border-radius: 3px; color: var(--ink); }
+  .ck b { font-family: var(--mono); font-size: var(--tiny); letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent-ink); flex: none; }
+
+  .chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: var(--tiny);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.42rem;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .chip.ok   { background: var(--ok-bg);   color: var(--ok); }
+  .chip.bad  { background: var(--fail-bg); color: var(--fail); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn); }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.885em;
+    background: var(--surface-2);
+    padding: 0.08em 0.32em;
+    border-radius: 2px;
+  }
+
+  /* ---------- callout ---------- */
+
+  .call { border-left: 3px solid var(--warn); background: var(--warn-bg); padding: 0.9rem 1.05rem; border-radius: 0 3px 3px 0; display: flex; flex-direction: column; gap: 0.45rem; }
+  .call p { margin: 0; color: var(--ink); font-size: var(--small); }
+  .call .call-h { font-family: var(--mono); font-size: var(--tiny); letter-spacing: 0.09em; text-transform: uppercase; color: var(--warn); }
+
+  /* ---------- tables ---------- */
+
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; font-size: var(--small); }
+  th, td { text-align: left; padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: var(--tiny); letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-3); background: var(--surface-2); font-weight: 500; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  ul.tight { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.4rem; color: var(--ink-2); }
+  ul.tight strong { color: var(--ink); }
+
+  .closer { margin-top: 3.5rem; padding-top: 1.4rem; border-top: 2px solid var(--ink); font-size: var(--small); color: var(--ink-2); }
+
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  @media (max-width: 34rem) {
+    .step { grid-template-columns: 1fr; gap: 0.5rem; }
+    .num { font-size: 1.1rem; padding-top: 0; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">Workstream 0 · local verification</p>
+    <h1>Ryvion Local Runbook</h1>
+    <p class="standfirst">Everything merged so far runs on your laptop with no cloud account, no credentials and no subscription. This is how to prove it — every command below was executed on this machine, and the expected output is what it actually printed.</p>
+    <dl class="facts">
+      <div class="fact"><dt>Repo state</dt><dd>main @ 4284dc7</dd></div>
+      <div class="fact"><dt>Slices covered</dt><dd>#2 #3 #4 #5 #6 #18</dd></div>
+      <div class="fact"><dt>Time needed</dt><dd>~15 min</dd></div>
+      <div class="fact"><dt>Cloud needed</dt><dd>none</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <p class="part-label">Part A</p>
+    <h2>Get the environment right</h2>
+    <p class="section-note">Two things go wrong here and nowhere else: the wrong Python, and a virtualenv that predates the last dependency change. Both fail loudly rather than silently, which is by design.</p>
+
+    <div class="step">
+      <div class="num">1</div>
+      <div class="step-body">
+        <h3>Create the virtualenv on Python 3.11</h3>
+        <p>Not 3.12 or newer. The package declares <code>requires-python == 3.11.*</code> and <code>pip</code> will refuse anything else — that refusal is the feature.</p>
+        <p class="lbl">PowerShell, from the repo root</p>
+<pre class="cmd">cd C:\Users\eastih\Downloads\ryvion-mlops
+git checkout main
+git pull
+
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1</pre>
+        <p><span class="chip warn">Git Bash</span> use <code>source .venv/Scripts/activate</code> instead.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">2</div>
+      <div class="step-body">
+        <h3>Install the locked environment, then the package</h3>
+        <p>The lockfile pins 150-odd packages to exact versions — the same ones CI validated. The second command installs this repo's own code without letting pip renegotiate any of those versions.</p>
+<pre class="cmd">python -m pip install --upgrade pip
+python -m pip install -r environments/dev.lock.txt
+python -m pip install -e . --no-deps</pre>
+        <div class="ck"><b>Checkpoint</b><span>No resolver errors. If pip starts <em>downgrading</em> things, you skipped <code>--no-deps</code>.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">3</div>
+      <div class="step-body">
+        <h3>Run the gate that every pull request runs</h3>
+        <p>These are the two commands both CI systems execute. Nothing else in this runbook matters if these fail.</p>
+<pre class="cmd">python -m flake8 .
+python -m pytest</pre>
+        <p class="lbl">Expected</p>
+<pre class="out"><span class="d">(flake8 prints nothing and exits 0)</span>
+
+<span class="g">156 passed</span>, 2 warnings in 21.41s</pre>
+        <div class="ck"><b>Checkpoint</b><span><span class="chip ok">156 passed</span> — the README still says <code>150</code>; it went stale when slice #18 merged. The number to trust is the one pytest prints.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="part-label">Part B</p>
+    <h2>Run the four-step pipeline</h2>
+    <p class="section-note">Validate → train → evaluate → register. These are the same four steps that will become cloud jobs in slices #7 and #8; running them here is the local rehearsal of that pipeline. Each one signals through its exit code, which is how a pipeline knows to stop.</p>
+
+    <div class="step">
+      <div class="num">4</div>
+      <div class="step-body">
+        <h3>Point MLflow at a database, then validate the data</h3>
+        <p>The model registry needs a database-backed store — a plain file store has no registry. SQLite gives you one locally with no server. Set this once; every step below inherits it.</p>
+<pre class="cmd"><span class="c"># PowerShell — keep this shell open for the rest of Part B</span>
+$env:MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
+
+python -m automobile.entrypoints.validate</pre>
+        <p class="lbl">Expected</p>
+<pre class="out">data: C:\Users\eastih\Downloads\ryvion-mlops\data\auto-mpg.csv
+<span class="g">PASS</span>  automobile-mpg data contract: 398 rows, 8 rules, no violations.</pre>
+        <div class="ck"><b>Checkpoint</b><span><span class="chip ok">exit 0</span> and 8 rules checked. Check with <code>echo $LASTEXITCODE</code>.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">5</div>
+      <div class="step-body">
+        <h3>Train the model</h3>
+        <p>Reads the seed CSV, fits the pipeline, logs the run and the model. Seconds, not minutes — the dataset is 398 rows.</p>
+<pre class="cmd">python -m automobile.entrypoints.train</pre>
+        <p class="lbl">Expected — copy the run id, you need it twice</p>
+<pre class="out">tracking uri:    sqlite:///mlflow.db
+experiment:      automobile-mpg
+run id:          <span class="g">71b2a2b888704baf908d19e378ea5b93</span>
+model uri:       models:/m-49055c6012d54e69ae547e61f344e9ea
+train metrics:   {'mse': 11.663944908970032, 'rmse': 3.415251807549486, ...}
+test metrics:    {'mse': <span class="g">8.195643426571698</span>, 'rmse': 2.862803420874667, ...}</pre>
+        <div class="ck"><b>Checkpoint</b><span>Your run id will differ. <code>test mse</code> should be <code>8.1956…</code> — the split is seeded, so this number is reproducible.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">6</div>
+      <div class="step-body">
+        <h3>Evaluate, then register</h3>
+        <p>Nothing is registered yet, so the gate has no incumbent to beat and promotes by default — the first model ever trained becomes the baseline. Substitute your own run id.</p>
+<pre class="cmd">python -m automobile.entrypoints.evaluate --run-id &lt;YOUR_RUN_ID&gt;
+python -m automobile.entrypoints.register --run-id &lt;YOUR_RUN_ID&gt;</pre>
+        <p class="lbl">Expected</p>
+<pre class="out">incumbent:       none registered yet
+policy:          test_mse minimise, margin 0.0
+decision:        <span class="g">promote (no-incumbent)</span>
+
+Successfully registered model 'automobile-mpg'.
+Created version '1' of model 'automobile-mpg'.
+new version:      <span class="g">1</span></pre>
+        <div class="ck"><b>Checkpoint</b><span>Both <span class="chip ok">exit 0</span>, and version <code>1</code> exists. Browse it with <code>mlflow ui --backend-store-uri sqlite:///mlflow.db</code>.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="part-label">Part C</p>
+    <h2>Prove the gates actually stop things</h2>
+    <p class="section-note">This is the part worth your attention. A pipeline that passes when everything is fine proves very little — what matters is that it <em>refuses</em> when something is wrong. Both tests below are meant to fail, and a zero exit code here would be the bug.</p>
+
+    <div class="step">
+      <div class="num">7</div>
+      <div class="step-body">
+        <h3>Train a deliberately bad model and watch the gate reject it</h3>
+        <p>Starve it of training data by holding back 90% for testing. The model gets measurably worse, and the gate compares it against the version you just registered.</p>
+<pre class="cmd">python -m automobile.entrypoints.train --test-size 0.9
+python -m automobile.entrypoints.evaluate --run-id &lt;THE_NEW_RUN_ID&gt;</pre>
+        <p class="lbl">Expected — this failure is the pass condition</p>
+<pre class="out">decision:        <span class="r">reject (below-threshold)</span>
+why:             reject: test_mse=16.425971664863873 misses the
+                 required 8.195643426571698 (incumbent 8.195643426571698)</pre>
+        <div class="ck"><b>Checkpoint</b><span><span class="chip bad">exit 1</span>. In a pipeline that non-zero exit is what stops the run before anything gets registered.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">8</div>
+      <div class="step-body">
+        <h3>Try to register the rejected model anyway</h3>
+        <p>Belt and braces. Even if someone bypasses the exit code, the register step reads the gate's verdict off the run itself and refuses. This is the property the whole quality-gate slice exists to guarantee.</p>
+<pre class="cmd">python -m automobile.entrypoints.register --run-id &lt;THE_BAD_RUN_ID&gt;</pre>
+        <p class="lbl">Expected</p>
+<pre class="out"><span class="r">refusing to register run 19b06623d6864954b0bf9df5aa2a25e3:</span>
+automobile.gate.decision is reject. Only a candidate the
+quality gate promoted is registered.</pre>
+        <div class="ck"><b>Checkpoint</b><span><span class="chip bad">exit 1</span>, and the registry still holds exactly <strong>one</strong> version, not two.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">9</div>
+      <div class="step-body">
+        <h3>Corrupt the data and watch the contract catch it</h3>
+        <p>Copy the seed CSV, break something in the copy, and point the validator at it. The contract names the rule that failed and the rows that caused it.</p>
+<pre class="cmd">Copy-Item data\auto-mpg.csv $env:TEMP\broken.csv
+<span class="c"># open it and change one mpg value to -1, then:</span>
+python -m automobile.entrypoints.validate --data $env:TEMP\broken.csv</pre>
+        <div class="ck"><b>Checkpoint</b><span><span class="chip bad">exit 1</span>, and the message names <code>mpg_is_positive</code> plus the offending row number.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="part-label">Part D</p>
+    <h2>Build and run the serving container</h2>
+    <p class="section-note">The hand-built image — the one students construct themselves and later deploy to Kubernetes. It needs a container engine and nothing else: no cloud account, no registry login. This is the artifact that 13 hours of the course depends on.</p>
+
+    <div class="step">
+      <div class="num">10</div>
+      <div class="step-body">
+        <h3>Export the model beside the Dockerfile</h3>
+        <p>The image bakes in a model rather than fetching one. <code>serving/model/</code> is gitignored — the repo versions code and seed data, not artifacts. Use the <em>model uri</em> printed by your good training run in step 5.</p>
+<pre class="cmd">mlflow artifacts download --artifact-uri models:/&lt;YOUR_MODEL_ID&gt; --dst-path serving/model</pre>
+        <div class="ck"><b>Checkpoint</b><span><code>serving/model/</code> contains <code>MLmodel</code>, <code>model.pkl</code> and a <code>code/</code> directory. That <code>code/</code> folder is slice #18 — the model now carries its own source and loads without the repo.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">11</div>
+      <div class="step-body">
+        <h3>Build and start it</h3>
+        <p>Build from the repo root, not from <code>serving/</code> — the Dockerfile needs the requirements manifest that lives above it. First build takes a few minutes; it is ~1.4&nbsp;GB.</p>
+<pre class="cmd">docker build -f serving/Dockerfile -t ryvion-mlops-serving:local .
+docker run -d --name ryvion --rm -p 8000:8000 ryvion-mlops-serving:local
+docker ps</pre>
+        <div class="ck"><b>Checkpoint</b><span>Status reaches <code>(healthy)</code> after ~30s — the image has its own HEALTHCHECK, so Docker is testing it for you.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">12</div>
+      <div class="step-body">
+        <h3>Call it</h3>
+        <p class="plain">Three requests: a normal one, one where horsepower is unknown, and one that is malformed on purpose.</p>
+        <div class="call">
+          <p class="call-h">PowerShell trap</p>
+          <p>In PowerShell, <code>curl</code> is an alias for <code>Invoke-WebRequest</code> and will not understand <code>-X</code> or <code>-d</code>. Type <code>curl.exe</code> explicitly, as below, or use Git Bash.</p>
+        </div>
+<pre class="cmd">curl.exe -s localhost:8000/healthz
+curl.exe -s localhost:8000/readyz
+
+<span class="c"># put the JSON in a variable — quoting it inline is where this goes wrong</span>
+$body = '{"records":[{"cylinders":8,"displacement":307.0,"horsepower":130.0,"weight":3504,"acceleration":12.0,"model year":70,"origin":1,"car name":"chevrolet chevelle malibu"}]}'
+
+curl.exe -s -X POST localhost:8000/predict -H "Content-Type: application/json" -d $body</pre>
+        <p class="lbl">Expected</p>
+<pre class="out">{"status":"ok"}
+{"status":"ready","model_uri":"/app/serving/model"}
+{"predictions":[<span class="g">14.975242297915628</span>]}</pre>
+        <p>Now send the same record with <code>"horsepower": null</code>, and then one with columns missing:</p>
+<pre class="out">horsepower null   -&gt; {"predictions":[<span class="g">15.294602119006564</span>]}
+missing columns   -&gt; <span class="r">HTTP 422</span> "record 0 is missing required columns
+                     'displacement', 'weight', … ; see GET /schema."</pre>
+        <div class="ck"><b>Checkpoint</b><span>The <code>null</code> case is the interesting one: a <em>different</em> prediction, because the imputer inside the model substituted the mean it learned during training. The service itself knows nothing about that.</span></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num">13</div>
+      <div class="step-body">
+        <h3>Tear down</h3>
+<pre class="cmd">docker rm -f ryvion
+Remove-Item mlflow.db
+Remove-Item -Recurse serving\model, mlruns</pre>
+        <p>Nothing here bills you — but making teardown the last step of every lab sheet is a habit worth building now, because the cloud slices genuinely do bill.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="part-label">Scope</p>
+    <h2>What this does <em>not</em> test</h2>
+    <p class="section-note">Worth being precise about, because passing everything above does not mean the migration is done.</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Area</th><th>Status</th><th>Why</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Azure ML SDK v2 / <code>az ml</code> job definitions</td><td class="mono">not built</td><td>Slices #7 and #8. No <code>azureml/</code> directory exists yet — a test actively forbids importing any cloud SDK.</td></tr>
+          <tr><td>Managed online endpoint</td><td class="mono">not built</td><td>Slice #9. Needs a workspace.</td></tr>
+          <tr><td>CI/CD pipeline definitions</td><td class="mono">not built</td><td>Slice #10. Needs an Azure DevOps organisation.</td></tr>
+          <tr><td>Apple Silicon</td><td class="mono">unverified</td><td>Issue #20. The image was proven under emulation only; nobody has run it on an M-series Mac.</td></tr>
+          <tr><td>Image size</td><td class="mono">known issue</td><td>Issue #19. 1.4&nbsp;GB, because the serving manifest pins full MLflow.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <p class="part-label">Reference</p>
+    <h2>When something goes wrong</h2>
+    <ul class="tight">
+      <li><strong>“No module named numpy”</strong> — you are running the system Python, not the virtualenv. Re-activate it, or call <code>.venv\Scripts\python.exe</code> directly.</li>
+      <li><strong>“No module named pandera”</strong> — your virtualenv predates the data-contract slice. Re-run <code>pip install -r environments/dev.lock.txt</code>. This failing loudly is the lockfile working.</li>
+      <li><strong>Registry errors mentioning a file store</strong> — <code>MLFLOW_TRACKING_URI</code> is unset in this shell. It does not persist across terminals.</li>
+      <li><strong><code>curl</code> rejects <code>-X</code> or <code>-d</code></strong> — PowerShell's alias. Use <code>curl.exe</code>.</li>
+      <li><strong>Port 8000 already in use</strong> — <code>docker rm -f ryvion</code>, or map a different port with <code>-p 8001:8000</code>.</li>
+      <li><strong><code>readyz</code> returns 503</strong> — the container is up but no model loaded. You most likely skipped step 10, or built before exporting the model.</li>
+    </ul>
+  </section>
+
+  <p class="closer">Every command and every expected output on this page was executed against <code>main</code> at <code>4284dc7</code> on 21 August 2026. Where a value is machine-specific — run ids, model ids, paths — the sample is shown so you can recognise the shape, not match it exactly.</p>
+
+</div>

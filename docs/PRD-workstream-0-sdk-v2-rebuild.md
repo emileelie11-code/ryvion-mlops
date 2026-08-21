@@ -1,8 +1,36 @@
-# PRD — Workstream 0: Ryvion MLOps teaching repo, rebuilt on Azure ML SDK v2
+# PRD — Workstream 0: the Ryvion MLOps teaching repo
 
-**Status:** ready for implementation
+**Status:** in progress — the local core is built and merged
 **Scope:** this repository only
-**Blocks:** all slide production for the course sections on CI/CD, MLOps pipelines, and testing/observability
+**Blocks:** slide production for the course sections on CI/CD, MLOps pipelines, and testing/observability
+
+---
+
+## Revision 2 — the cloud dependency is withdrawn (21 Aug 2026)
+
+This PRD originally specified a rebuild onto Azure ML SDK v2 and the `az ml` CLI. **That premise
+has been withdrawn.** Re-reading the course syllabus directly — rather than a summary of it —
+settled the question: across all three pages it contains **zero** occurrences of Azure, AWS, GCP
+or "managed", and two of "cloud", both of which are context rather than content (the
+programme block's name, and a *prerequisite*).
+
+Every tool the syllabus names by name — GitHub Actions, Docker, Kubernetes, Helm, Prometheus,
+Grafana, MLflow — runs on a laptop. Two of them are named with no alternative offered, and both
+were the ones a cloud platform made *harder* to satisfy rather than easier.
+
+**What this changes:** the orchestration target, the deployment target, and the access model.
+**What it does not change:** the module design, the model artifact, the data contract, the
+testing decisions, or anything already built. The engineering core of this document stands as
+written; the sections below are marked where they were revised.
+
+**What it removes:** per-student cloud subscriptions and their credit budget, two directory
+permissions nobody had confirmed, a CI platform organisation per student with a multi-week
+approval lead time, a shared managed Kubernetes cluster with per-student namespace provisioning,
+and a continuously-billing endpoint that had to be remembered and torn down.
+
+**Progress at revision time:** six slices merged, 156 tests green, verified end to end on a
+clean machine — the toolchain skeleton, local training producing a signed model artifact, the
+data contract, the quality gate, and the hand-built serving container.
 
 ---
 
@@ -52,40 +80,44 @@ Rebuild the repository as a **narrow rebuild**, not a port.
 
 Keep the domain code's *shape* — the same story, the same dataset, the same four conceptual steps,
 the same file names where students' slides reference them. Delete the orchestration layer
-entirely and replace it with declarative `az ml` CLI v2 job definitions. Repair the domain code.
+entirely and replace it with declarative CI workflows. Repair the domain code.
 Extract the parts that the course needs to *demonstrate* into small, pure, independently testable
 modules.
 
 The rebuilt repository delivers:
 
-- **A four-step training pipeline** — validate → train → evaluate → register — expressed as job
-  definitions, submitted with a single blocking command that returns a non-zero exit code on
-  failure. The publish-then-trigger-by-REST dance disappears, along with the dead marketplace task
-  that performed it.
+- **A four-step training pipeline** — validate → train → evaluate → register — each step an
+  ordinary command-line entrypoint that exits non-zero on failure, chained as dependent CI jobs.
+  The publish-then-trigger-by-REST dance disappears, along with the dead marketplace task that
+  performed it. Every step remains runnable by hand, which is what makes the pipeline teachable.
 - **A data contract** as executable code, running as step zero of the pipeline, written against
   the dataset's real defects rather than invented ones.
 - **A model artifact that carries its own preprocessing**, logged with an MLflow signature, so the
   scoring interface accepts named columns and the skew is closed.
-- **Two deployment paths, taught as a contrast**: a hand-written serving container that students
-  build, run locally, and later deploy to Kubernetes; and a no-code managed endpoint that the
-  platform builds from the registered model. The comparison between them is a teaching objective,
-  not an accident.
-- **MLflow used twice**: against a local file-based tracking store with no cloud involved, and
-  against the managed backend with one line changed. Demonstrating that portability is the point.
+- **Two deployment paths, taught as a contrast** *(revised)*: a hand-written serving container
+  that students build, run locally, and deploy to Kubernetes themselves — and a managed endpoint
+  that a platform builds from the registered model, **demonstrated once by the instructor**
+  rather than operated by each student. The comparison remains a teaching objective; only which
+  side is hands-on has flipped, and the hands-on side is now the one that teaches more.
+- **MLflow used twice** *(revised)*: against a local file-based store, then against a
+  database-backed store where the model registry lives. The portability point still lands, and
+  lands more honestly — the tracking destination is configuration that never appears in the
+  code, so the same training script runs against a file store, a local database, or a remote
+  tracking server without modification.
 - **Working CI**: linting and unit tests actually enabled.
 
-The work is sequenced so that **the first two stages require no cloud account at all**, which
-means implementation can begin before any subscription, tenant or permission question is settled.
+**No stage requires a cloud account.** The original sequencing existed to get useful work done
+before an institutional approval landed; the approval is no longer needed at all.
 
 ## User Stories
 
 **Instructor — preparing the course**
 
-1. As the instructor, I want the repository to run end-to-end on a current Azure ML SDK, so that I can capture screenshots that will still be accurate when I teach.
+1. As the instructor, I want the repository to run end-to-end on a current, maintained toolchain, so that I can capture screenshots that will still be accurate when I teach.
 2. As the instructor, I want the training pipeline submitted by a single blocking command, so that a live demo has one thing to fail rather than four.
 3. As the instructor, I want the pipeline to fail loudly and visibly when a step fails, so that failure is demonstrable rather than silent.
 4. As the instructor, I want the orchestration expressed declaratively, so that I can show a student the whole pipeline on one slide.
-5. As the instructor, I want the first two stages of the rebuild to need no cloud account, so that my build is not blocked on institutional approvals.
+5. As the instructor, I want no stage of the rebuild to need a cloud account, so that neither my build nor my students' work is blocked on an institutional approval.
 6. As the instructor, I want every direct dependency pinned to an exact version, so that this repository does not decay the way its predecessor did.
 7. As the instructor, I want the story of *why* its predecessor decayed preserved in the repository history, so that I can teach reproducibility from a real incident rather than a hypothetical.
 8. As the instructor, I want the repository to contain no dead, duplicated or never-executed code, so that a student reading it is not learning from something that has never worked.
@@ -138,12 +170,14 @@ means implementation can begin before any subscription, tenant or permission que
   orchestration layer is deleted outright. The package that exists solely to build, publish and
   trigger a pipeline object ceases to exist — 21 of 23 Python files are removed, and the
   orchestration collapses into six declarative job definitions.
-- **Declarative job definitions are the primary interface.** Compute, environment, data asset,
-  pipeline, endpoint and deployment are all YAML. Submission is a single blocking CLI call that
-  streams logs and exits non-zero on failure. This replaces the publish → fetch-ID →
-  REST-invoke → poll sequence and removes a dependency on a deprecated marketplace CI task.
-- **One Python SDK submission script is retained deliberately**, as a short programmatic contrast
-  during teaching. Nothing in the repository's critical path depends on it.
+- **Declarative CI workflows are the primary interface** *(revised — was cloud job YAML).* The
+  four pipeline steps are dependent jobs in a single workflow on the code host's own CI. Each
+  step is an ordinary command-line entrypoint that exits non-zero on failure, so the pipeline
+  stops without any platform-specific control flow. This removes the publish → fetch-ID →
+  REST-invoke → poll sequence *and* the second CI platform the original plan required.
+- **The steps stay runnable by hand.** Every entrypoint works identically on a laptop and in CI.
+  That is what makes the pipeline teachable: a student runs a step, sees its exit code, and only
+  then sees the workflow that chains them.
 - **The evaluation step's parent-cancellation behaviour is replaced by exit codes.** A failing
   quality gate exits non-zero, the job fails, and registration never runs. The semantics differ
   from the original (the run reports as *failed*, not *cancelled*); this is accepted and is the
@@ -208,23 +242,29 @@ and is explainable. The subject is operations, not modelling.
   by the inherited preprocessing code: a numeric column containing sentinel non-numeric values, a
   known row count, and a target that must be positive.
 
-### Deployment — two paths, deliberately
+### Deployment — two paths, deliberately *(revised)*
 
-| | Hand-built path | Managed path |
+| | Hand-built path — **students** | Managed path — **instructor demo** |
 |---|---|---|
-| Model source | trained locally, local tracking store | pipeline → model registry |
+| Model source | trained locally, local tracking store | the model registry |
 | Image | hand-written multi-stage Dockerfile, non-root | built by the platform |
-| Registry | public registry, then a cloud container registry | cloud container registry, automatic |
-| Runtime | local container engine, then Kubernetes | managed online endpoint |
+| Registry | local registry, then the code host's registry | the platform's registry, automatic |
+| Runtime | local container engine, then a local Kubernetes cluster | a managed endpoint |
+| Who operates it | every student, throughout | shown once, from the instructor's own account |
 | Teaching point | *"I control the image"* | *"the platform controls it — here is the trade"* |
+
+The hand-built path also gains the deployment-strategy work: canary, blue-green and **shadow**
+are all expressible with the Helm charts already in this repository, on a local cluster. A
+managed endpoint offers traffic splitting but not a genuine shadow deployment — so the local
+path is not a downgrade here, it is the only one that covers the full requirement.
 
 Both are first-class. The hand-built serving application is a small HTTP service exposing a
 prediction endpoint and a health endpoint, loading the model through its tracking flavour. Its
 image is the artifact that the Kubernetes manifests and Helm charts consume — which also gives
 the previously purposeless canary/blue-green charts something real to deploy.
 
-The managed path is reachable **only because the model carries its own preprocessing and a
-signature**; a bare estimator would produce an endpoint with an undocumented positional contract.
+Both paths depend on the model carrying **its own preprocessing and a declared signature**; a
+bare estimator would produce a service with an undocumented positional contract either way.
 
 ### Experiment tracking
 
@@ -244,12 +284,13 @@ laptop and only submitted to the platform to prove orchestration.
 
 - The repository is **public**, and students **fork it**. Coursework arrives as pull requests
   against their own fork, reviewable from one account.
-- The **CI/CD platform is separate from the code host**: each student runs pipelines in their own
-  organisation, connected to their own fork. This is a realistic industrial split and it makes
-  branch-versus-pull-request trigger behaviour demonstrable rather than theoretical.
-- **Service-principal creation lives in a standalone bootstrap script**, never assumed inside a
-  pipeline. Credentials are read from a variable group regardless of who created them, so the
-  instructor can run the identical script on students' behalf without any code change.
+- **CI runs on the code host** *(revised — was a separate CI organisation per student).* It runs
+  on a fork with no setup, no service connection, no organisation to create and no parallelism
+  grant to wait on, so a student gets feedback on their first pull request on day one. The
+  original split was defensible as industrial realism, but it cost every student an account and
+  an approval before a single test could run.
+- **No credentials are required at any point** *(revised).* The bootstrap script that created a
+  service identity, and the two directory permissions it depended on, are both withdrawn.
 
 ### Dependencies
 
@@ -265,18 +306,21 @@ laptop and only submitted to the platform to prove orchestration.
 
 ### Build sequence
 
-| Stage | Cloud needed | Deliverable | Checkpoint |
-|---|---|---|---|
-| **A** | no | Skeleton, data fixture, the five modules, the four entrypoints, tests, pins | Training runs on a laptop and produces a tracked model with a signature |
-| **B** | no | Serving application, Dockerfile, manifest | Container runs; prediction endpoint returns a prediction; health endpoint returns 200 |
-| **C** | yes | Data asset, compute, environment, pipeline definitions | Four-step pipeline runs green from a single blocking submit |
-| **D** | yes | Endpoint and deployment definitions | Model deployed and scored over HTTP; smoke test passes |
-| **E** | yes | CI, CD and pull-request definitions; lint/test template enabled | Green run against a fork |
-| **F** | yes | Acceptance run in a clean account, README only | See Testing Decisions |
+*(Revised. Stages C–F previously targeted a cloud platform and were blocked on an account that
+did not exist. They now target the same local toolchain as A and B, and nothing is blocked.)*
 
-**Stages A and B require no cloud account**, so implementation begins immediately and is not
-gated on institutional approvals. Stage B additionally completes the artifact that the container
-and orchestration sections of the course depend on.
+| Stage | Deliverable | Checkpoint | Status |
+|---|---|---|---|
+| **A** | Skeleton, data fixture, the five modules, the four entrypoints, tests, pins | Training runs on a laptop and produces a tracked model with a signature | **done** |
+| **B** | Serving application, Dockerfile, manifest | Container runs; prediction endpoint returns a prediction; health endpoint returns 200 | **done** |
+| **C** | The four steps as dependent CI jobs in one workflow | Pipeline runs green on a pull request; a failing contract or a rejected model stops it | to do |
+| **D** | Kubernetes manifests — Deployment, Service, probes, resource limits, autoscaling — plus canary / blue-green / shadow on the existing Helm charts | The serving image runs on a local cluster; a probe failure keeps traffic away; load drives a scale-up | to do |
+| **E** | Metrics instrumentation in the serving container; a monitoring stack on the local cluster; one dashboard | Predictions and latency visible on a dashboard scraped from the running container | to do |
+| **F** | Acceptance run on a clean machine, README only | See Testing Decisions | to do |
+
+**Stage B was also the course's container deliverable** — finishing it unblocked the container
+and orchestration sections outright. Stage E is the memory ceiling of the whole course and
+should be rehearsed on a typical student laptop rather than a workstation.
 
 ### Deletions
 
@@ -390,12 +434,18 @@ so the tests never ran. Both are seeded-defect material.
 **Estimate: 5–7 days** of focused engineering, of which Stages A and B are roughly two. The
 original estimate was 3–5 days; it assumed migrating working code.
 
-**Sequencing risk.** Stages C through F depend on a cloud account with permission to create an
-application registration and assign it a subscription role — two distinct grants, in two distinct
-systems, typically owned by two different teams. Neither has been confirmed for the student cohort
-at the time of writing. The build sequence above is deliberately ordered so that this uncertainty
-delays nothing for the first two stages, and the bootstrap script is deliberately standalone so
-that a refusal costs a change of operator rather than a change of architecture.
+**Sequencing risk — resolved, and worth recording how.** Stages C through F previously depended
+on a cloud account plus two directory permissions, in two systems, owned by two different teams,
+none of which had been confirmed. That risk was mitigated by ordering the work so the
+uncertainty blocked as little as possible — and then eliminated outright by removing the
+dependency. The mitigation was sound; the better move was noticing the dependency was never
+required.
+
+**The risk that replaces it is student machines.** The delivery risk is swapped rather than
+removed: a container engine on employer-managed laptops now carries the multi-week lead time,
+and available memory becomes the ceiling on the observability work. That belongs to the course
+plan rather than to this repository, but it is the reason nobody should read this revision as
+risk-free.
 
 **The course build plan is the upstream document** for anything not covered here — section-by-
 section hour budgets, reuse analysis, assessment design, and institutional logistics. It is
