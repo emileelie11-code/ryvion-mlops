@@ -264,8 +264,8 @@
     <h1>Ryvion Local Runbook</h1>
     <p class="standfirst">Everything merged so far runs on your laptop with no cloud account, no credentials and no subscription. This is how to prove it — every command below was executed on this machine, and the expected output is what it actually printed.</p>
     <dl class="facts">
-      <div class="fact"><dt>Repo state</dt><dd>main @ 4284dc7</dd></div>
-      <div class="fact"><dt>Slices covered</dt><dd>#2 #3 #4 #5 #6 #18</dd></div>
+      <div class="fact"><dt>Repo state</dt><dd>main @ 8585f14</dd></div>
+      <div class="fact"><dt>Slices covered</dt><dd>#2 #3 #4 #5 #6 #18 #19 #25 #26</dd></div>
       <div class="fact"><dt>Time needed</dt><dd>~15 min</dd></div>
       <div class="fact"><dt>Cloud needed</dt><dd>none</dd></div>
     </dl>
@@ -314,8 +314,8 @@ python -m pytest</pre>
         <p class="lbl">Expected</p>
 <pre class="out"><span class="d">(flake8 prints nothing and exits 0)</span>
 
-<span class="g">156 passed</span>, 2 warnings in 21.41s</pre>
-        <div class="ck"><b>Checkpoint</b><span><span class="chip ok">156 passed</span> — the README still says <code>150</code>; it went stale when slice #18 merged. The number to trust is the one pytest prints.</span></div>
+<span class="g">173 passed</span>, 7 deselected, 2 warnings in 23.91s</pre>
+        <div class="ck"><b>Checkpoint</b><span><span class="chip ok">173 passed</span>, and <code>7 deselected</code> — those seven are the integration test, held behind <code>-m integration</code> so the run you type before every commit stays fast. <code>python -m pytest -m integration</code> runs them: <span class="chip ok">7 passed</span>, about 45 seconds, no credentials and no network. The number to trust is always the one pytest prints.</span></div>
       </div>
     </div>
   </section>
@@ -323,7 +323,7 @@ python -m pytest</pre>
   <section>
     <p class="part-label">Part B</p>
     <h2>Run the four-step pipeline</h2>
-    <p class="section-note">Validate → train → evaluate → register. These are the same four steps that will become cloud jobs in slices #7 and #8; running them here is the local rehearsal of that pipeline. Each one signals through its exit code, which is how a pipeline knows to stop.</p>
+    <p class="section-note">Validate → train → evaluate → register. These are the same four steps <code>.github/workflows/pipeline.yml</code> runs as four dependent jobs; running them here by hand is the same pipeline with you as the runner. Each one signals through its exit code, which is how a pipeline knows to stop.</p>
 
     <div class="step">
       <div class="num">4</div>
@@ -509,9 +509,9 @@ Remove-Item -Recurse serving\model, mlruns</pre>
           <tr><th>Area</th><th>Status</th><th>Why</th></tr>
         </thead>
         <tbody>
-          <tr><td>Azure ML SDK v2 / <code>az ml</code> job definitions</td><td class="mono">not built</td><td>Slices #7 and #8. No <code>azureml/</code> directory exists yet — a test actively forbids importing any cloud SDK.</td></tr>
-          <tr><td>Managed online endpoint</td><td class="mono">not built</td><td>Slice #9. Needs a workspace.</td></tr>
-          <tr><td>CI/CD pipeline definitions</td><td class="mono">not built</td><td>Slice #10. Needs an Azure DevOps organisation.</td></tr>
+          <tr><td>Anything on a cloud platform</td><td class="mono">withdrawn</td><td>The cloud dependency was withdrawn on 21 Aug 2026 — see the Revision 2 banner in the PRD. There is no <code>azureml/</code> directory and a test actively forbids importing any cloud SDK.</td></tr>
+          <tr><td>The CI workflows</td><td class="mono">built, not run here</td><td>Issues #8 and #10. <code>.github/workflows/</code> holds the quality gate and the four-step pipeline; they run on a pull request against your fork, which is a different thing from this laptop checklist.</td></tr>
+          <tr><td>Kubernetes, Helm and the monitoring stack</td><td class="mono">built, not covered here</td><td>Issues #22, #23 and #24. This page stops at <code>docker run</code>. The README walks the cluster from there.</td></tr>
           <tr><td>Apple Silicon</td><td class="mono">unverified</td><td>Issue #20. The image was proven under emulation only; nobody has run it on an M-series Mac.</td></tr>
           <tr><td>Image size</td><td class="mono">done</td><td>Issue #19. 1.43&nbsp;GB → 830&nbsp;MB: the serving manifest pins <code>mlflow-skinny</code>, which drops the tracking server, the plotting stack and pyarrow. All 398 seed rows score to bit-identical values under both.</td></tr>
         </tbody>
@@ -534,6 +534,6 @@ Remove-Item -Recurse serving\model, mlruns</pre>
     </ul>
   </section>
 
-  <p class="closer">Every command and every expected output on this page was executed against <code>main</code> at <code>4284dc7</code> on 21 August 2026. Where a value is machine-specific — run ids, model ids, paths — the sample is shown so you can recognise the shape, not match it exactly.</p>
+  <p class="closer">Every command and every expected output on this page was executed against <code>main</code> at <code>8585f14</code> on 23 August 2026. Where a value is machine-specific — run ids, model ids, paths — the sample is shown so you can recognise the shape, not match it exactly.</p>
 
 </div>

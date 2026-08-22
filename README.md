@@ -1,9 +1,10 @@
 # ryvion-mlops
 
-The worked example for a 35-hour graduate MLOps module: an automobile price
-regression, taken from raw data to a served prediction, with the operational
-machinery around it visible rather than hidden. Students fork this repository
-and submit their coursework as pull requests against their own fork.
+The worked example for a 35-hour graduate MLOps module: a regression that
+predicts an automobile's fuel economy in miles per gallon, taken from raw data
+to a served prediction, with the operational machinery around it visible rather
+than hidden. Students fork this repository and submit their coursework as pull
+requests against their own fork.
 
 It is a rebuild. Its predecessor was a five-year-unmaintained fork of Microsoft's
 `MLOpsPython` reference architecture, and it no longer ran. One of the reasons it
@@ -13,35 +14,84 @@ constructor parameter it passed, and the training step died. Every dependency in
 this repository is pinned to an exact version, and a unit test fails the build if
 one is not.
 
+**Nothing here needs a cloud account.** Every stage - training, the pipeline,
+the container, the cluster, the monitoring stack - runs on a laptop.
+
 ---
+
+## Start here
+
+If you have just cloned this and want one thing to do: **[the
+Quickstart](#quickstart---from-a-fresh-clone-to-a-green-test-run)**. It is four
+steps, it takes about five minutes, and it ends with a green test run and a
+trained model.
+
+After that, the document is a path rather than a reference, and it is meant to
+be walked in order. Each part builds on the one above it:
+
+| # | Part | What you end up with | Needs |
+|---|---|---|---|
+| 1 | [Quickstart](#quickstart---from-a-fresh-clone-to-a-green-test-run) → [What runs today](#what-runs-today) | A model trained on your laptop, and the four pipeline steps run by hand | Python, git |
+| 2 | [The dataset](#the-dataset) → [The data contract](#the-data-contract) → [The model artifact](#the-model-artifact) → [The quality gate](#the-quality-gate) → [Where a run is recorded](#where-a-run-is-recorded) | Why each of those four steps does what it does | nothing more |
+| 3 | [Continuous integration](#continuous-integration---two-systems-on-purpose) → [The pipeline, as a CI workflow](#the-pipeline-as-a-ci-workflow) → [Triggers, environments and secrets](#triggers-environments-and-secrets) | The same four steps on a machine that is not yours, with an approval in front of promotion | a fork |
+| 4 | [The serving container](#the-serving-container) | The model behind an HTTP API, in an image you built | a container engine |
+| 5 | [The same container, on Kubernetes](#the-same-container-on-kubernetes) | That image deployed, probed, and autoscaling | kind, kubectl |
+| 6 | [Deployment strategies](#deployment-strategies-blue-green-canary-and-shadow) | Blue-green, canary and shadow, all three operable | Helm |
+| 7 | [Observability](#observability-metrics-one-dashboard-and-an-alert-that-fires) | Prometheus, one Grafana dashboard, and an alert you can make fire | 8 GB of RAM |
+
+Then [Repository layout](#repository-layout), [Dependencies](#dependencies) and
+[Carried over from the predecessor](#carried-over-from-the-predecessor) are
+reference rather than path.
+
+`docs/runbook.html` is the same ground as parts 1 and 4 in checklist form -
+every command with the output it actually printed - if you would rather verify
+than read.
 
 ## Requirements
 
-- **Python 3.11.** Not 3.12 or newer - the package declares `requires-python`
-  as `==3.11.*` and `pip install` will refuse anything else. 3.11 is the widest
-  overlap between Azure ML's curated images, `azure-ai-ml` and MLflow.
-- `git`.
+Everything you need, in one place. Nothing on this list is a cloud account, and
+nothing on it costs money.
 
-Nothing else to train the model: it runs on a laptop with no cloud account and
-no credentials.
+| | Version | Needed from | Check it with |
+|---|---|---|---|
+| **Python** | **3.11** exactly | part 1 | `python3.11 --version` |
+| **git** | any | part 1 | `git --version` |
+| **A container engine** (Docker Desktop, Rancher Desktop, Podman…) | Docker 29.6.1 here | part 4 | `docker version` |
+| **`kind`** | 0.32.0 here | part 5 | `kind version` |
+| **`kubectl`** | matching the cluster - v1.36.1 here | part 5 | `kubectl version --client` |
+| **`helm`** | 3 or newer - v4.0.5 here | part 6 | `helm version --short` |
+| **`bash` and `curl`** | any | parts 4-7 | already present outside Windows; Git Bash on it |
+| **8 GB of RAM** | a floor, not a minimum | part 7 | see below |
 
-Two later sections need more, and neither of them needs a cloud account either:
+**Python 3.11, and not 3.12 or newer.** The package declares `requires-python`
+as `==3.11.*` and `pip install` will refuse anything else. The pin is deliberate
+and it is the same argument as every other pin here: the version that is boring
+and universal beats the version that is current.
 
-- A **container engine** for building and running the serving image.
-- **`kind` and `kubectl`** for deploying it to Kubernetes. kind runs a whole
-  cluster as Docker containers, so the orchestration half of the course is also
-  a laptop exercise. See [the same container, on
-  Kubernetes](#the-same-container-on-kubernetes).
-- **8 GB of RAM**, and it is a real floor rather than a polite minimum. The
-  heaviest configuration the course asks for is the three-node cluster with the
-  serving container, the metrics API and the monitoring stack on it, and that is
-  **about 2.4 GB resident** with everything running - on top of the container
-  engine, a browser and an editor. Every number behind that is measured and
-  tabulated under [the memory
-  decision](#the-memory-decision-the-operator-bundle-or-two-deployments). The
-  single most effective thing you can do about it is delete your cluster when
-  you stop working; a forgotten one from last week is the usual reason the
-  monitoring section does not fit.
+**On Windows, the shell blocks below are written for Git Bash.** Where a
+PowerShell equivalent differs it is given inline. One difference catches
+everybody: PowerShell aliases `curl` to `Invoke-WebRequest`, which rejects `-X`
+and `-d`, so type `curl.exe` there instead.
+
+**The container engine is the only large download.** kind runs a whole
+Kubernetes cluster as Docker containers, which is what makes parts 5 to 7 a
+laptop exercise rather than a cloud account - no control plane to pay for, no
+credentials, and teardown is one command. Docker Desktop and Rancher Desktop
+both ship a `kubectl`, so you may already have one; `kubectl version --client`
+is the check. Install commands for `kind`, `kubectl` and `helm` are given where
+each is first needed - [What you need](#what-you-need) for the first two, and
+[Setting the lab up](#setting-the-lab-up) for Helm.
+
+**8 GB of RAM is a real floor rather than a polite minimum.** The heaviest
+configuration the course asks for is the three-node cluster with the serving
+container, the metrics API and the monitoring stack on it, and that is **about
+2.4 GB resident** with everything running - on top of the container engine, a
+browser and an editor. Every number behind that is measured and tabulated under
+[the memory
+decision](#the-memory-decision-the-operator-bundle-or-two-deployments). The
+single most effective thing you can do about it is delete your cluster when you
+stop working; a forgotten one from last week is the usual reason the monitoring
+section does not fit.
 
 ## Quickstart - from a fresh clone to a green test run
 
@@ -94,6 +144,8 @@ tracking uri:    file:///.../ryvion-mlops/mlruns
 experiment:      automobile-mpg
 run id:          6855a100cc4644dfbfd9d3422f79624f
 model uri:       models:/m-fbaecf2e2b3344e2a9d2202d97446a1d
+train metrics:   {'mse': 11.663944908970032, 'rmse': 3.415251807549486, ...}
+test metrics:    {'mse': 8.195643426571698, 'rmse': 2.862803420874667, ...}
 ```
 
 `mlflow ui` in the same directory will show the run, its parameters, its
@@ -145,6 +197,45 @@ chains the same four commands as four dependent jobs - see [The pipeline, as a
 CI workflow](#the-pipeline-as-a-ci-workflow) - and nothing in the entrypoints
 knows whether it is being run by CI or by you.
 
+## The dataset
+
+`data/auto-mpg.csv` is the canonical UCI *Auto MPG* dataset, committed as a seed
+fixture: 398 cars, nine columns, and **six rows whose `horsepower` is `?`
+instead of a number**. Those six are not dirt left behind by accident. They are
+the dataset's real defect, they are what the data contract is written against,
+and they are what the model pipeline survives without help from its caller. Do
+not "clean" them out of the file - the loader reads `?` as a missing value on the
+way in, which is a different thing from the file not having it.
+
+The file is committed rather than downloaded because a classroom that depends on
+an upstream host being reachable at 09:00 is a classroom that occasionally does
+not happen. The `register` step records which file a version was trained on, and
+how many rows it held, as tags on the registered version - so a model that
+cannot say what it was made from is not something this repository can produce.
+
+Source: <https://archive.ics.uci.edu/dataset/9/auto+mpg>, file `auto-mpg.data`
+(MD5 `b858f4580d0066c48e260dd3b96f1ed8`), converted to CSV with the header row
+the notebook uses. No value was changed.
+
+### `data/auto-mpg-corrupt.csv`
+
+The same file with exactly two cells changed, committed so that the data
+contract can be watched refusing something rather than only read about. Row
+numbers are the ones the report prints:
+
+| Row | Change | Rule it breaks |
+|---|---|---|
+| 0 | `mpg` `18.0` → `-18.0` | `mpg_is_positive` |
+| 3 | `horsepower` `150.0` → `?` | `horsepower_missing_count_is_the_documented_six` |
+
+Two defects, two rules, one pass - the second one being the interesting kind:
+a *seventh* `?` is not obviously wrong to a human reading the file, and it is
+caught only because the contract knows the documented number of holes is six.
+
+Nothing trains on it. It exists for `--data data/auto-mpg-corrupt.csv`, on a
+laptop or in the pipeline workflow, and it is the shortest honest answer to "how
+do I know the gate works?"
+
 ## The data contract
 
 `automobile/data_contract.py` holds every rule about this dataset behind one
@@ -190,44 +281,6 @@ pipeline, where it is serialised into the artifact - moving it would reintroduce
 exactly the training/serving skew this repository was rebuilt to close. The rule
 is the line between the two: **stateless format parsing at the boundary, fitted
 transforms inside the model.**
-
-## The dataset
-
-`data/auto-mpg.csv` is the canonical UCI *Auto MPG* dataset, committed as a seed
-fixture: 398 cars, nine columns, and **six rows whose `horsepower` is `?`
-instead of a number**. Those six are not dirt left behind by accident. They are
-the dataset's real defect, they are what the data contract is written against,
-and they are what the model pipeline survives without help from its caller. Do
-not "clean" them out of the file - the loader reads `?` as a missing value on the
-way in, which is a different thing from the file not having it.
-
-The file is committed rather than downloaded because a classroom that depends on
-an upstream host being reachable at 09:00 is a classroom that occasionally does
-not happen. Later slices register it as a versioned data asset; the committed
-file is the seed, and the asset version is what appears in a model's lineage.
-
-Source: <https://archive.ics.uci.edu/dataset/9/auto+mpg>, file `auto-mpg.data`
-(MD5 `b858f4580d0066c48e260dd3b96f1ed8`), converted to CSV with the header row
-the notebook uses. No value was changed.
-
-### `data/auto-mpg-corrupt.csv`
-
-The same file with exactly two cells changed, committed so that the data
-contract can be watched refusing something rather than only read about. Row
-numbers are the ones the report prints:
-
-| Row | Change | Rule it breaks |
-|---|---|---|
-| 0 | `mpg` `18.0` → `-18.0` | `mpg_is_positive` |
-| 3 | `horsepower` `150.0` → `?` | `horsepower_missing_count_is_the_documented_six` |
-
-Two defects, two rules, one pass - the second one being the interesting kind:
-a *seventh* `?` is not obviously wrong to a human reading the file, and it is
-caught only because the contract knows the documented number of holes is six.
-
-Nothing trains on it. It exists for `--data data/auto-mpg-corrupt.csv`, on a
-laptop or in the pipeline workflow, and it is the shortest honest answer to "how
-do I know the gate works?"
 
 ## The model artifact
 
@@ -363,15 +416,39 @@ prints the destination it used; see ["No incumbent" is two different
 things](#no-incumbent-is-two-different-things).
 
 The file is created on first use, ignored by git, and still no account and no
-network. It is the **only** difference between running the gate locally and
-running it against the managed workspace, where the same variable points at the
-workspace instead. The destination stays
-configuration - nothing in this repository branches on it, and nothing
-hard-codes it.
+network. It is also the **only** difference between running the gate here and
+running it against a shared tracking server, where the same variable points at
+that server instead. The destination stays configuration - nothing in this
+repository branches on it, and nothing hard-codes it.
 
 `mlflow ui --backend-store-uri sqlite:///mlflow.db` shows the runs, the gate
 tags and the registered versions together. To start over, delete `mlflow.db` and
 `mlruns/`.
+
+## Continuous integration - two systems, on purpose
+
+Everything above this line you ran by hand. Everything below it is the same
+work, run by a machine that is not yours. Three definitions do that, and it is
+worth knowing which is which before meeting any of them:
+
+- **`.github/workflows/ci.yml`** is the always-on gate on the *code*. It runs
+  lint, the unit tests, and then the integration test that defends the pipeline's
+  refusal paths, on every pull request, and needs no setup at all: fork the
+  repository, open a pull request, and it runs. This is what gives coursework
+  instant feedback.
+- **`.github/workflows/pipeline.yml`** is the gate on the *model*: the four
+  pipeline steps as four dependent jobs, described under [The pipeline, as a CI
+  workflow](#the-pipeline-as-a-ci-workflow). Same triggers, same absence of
+  setup.
+- **`.pipelines/pr.yml`** is the same gate on the CI platform the module
+  teaches, connected to a student's own organisation and their own fork. It is
+  the artifact to read and extend, and it makes the split between code host and
+  CI platform - two definitions, two systems, one repository - concrete.
+
+The first and the third run `flake8 .` and `pytest` - the same two commands the
+[Quickstart](#quickstart---from-a-fresh-clone-to-a-green-test-run) has you type.
+In the predecessor, the template holding those two commands was commented out of
+the pipeline, so neither ever ran. Here it is included.
 
 ## The pipeline, as a CI workflow
 
@@ -656,13 +733,14 @@ JSON - is no longer the string being matched and comes out in the clear.
 
 ## The serving container
 
-There are two deployment paths in this repository and the contrast between them
-is the lesson. This is the first one: an image you build yourself, from a
-Dockerfile short enough to read in one sitting. Later, the platform builds an
-equivalent image from the model registry and you get to judge the trade. This
-half needs a container engine and nothing else - no cloud account, no
-credentials, no registry login - so the whole container-and-Kubernetes portion
-of the course runs on a laptop.
+There are two deployment paths and the contrast between them is the lesson. This
+is the one you operate: an image you build yourself, from a Dockerfile short
+enough to read in one sitting. The other - a managed platform building an
+equivalent image from the model registry, with nothing for you to write - is
+demonstrated once rather than run by each student, and judging the trade between
+them is the point of having seen both. This half needs a container engine and
+nothing else - no cloud account, no credentials, no registry login - so the
+whole container-and-Kubernetes portion of the course runs on a laptop.
 
 ### Build it and run it
 
@@ -723,10 +801,28 @@ curl -s -X POST localhost:8000/predict \
 # {"predictions":[14.975242297915628]}
 ```
 
-Send `"horsepower": "?"` and you still get a prediction. That is the point of
-the whole design: the sentinel is handled by the imputer *inside* the model,
-with the mean it learned at training time, and this service does not know that
-imputation is a thing that exists.
+Send `"horsepower": null` - "unknown" - and you still get a prediction:
+
+```bash
+# ... "horsepower": null, ...
+# {"predictions":[15.294602119006564]}
+```
+
+That is the point of the whole design: the hole is filled by the imputer
+*inside* the model, with the mean it learned at training time, and this service
+does not know that imputation is a thing that exists.
+
+Note which spelling of "unknown" the wire accepts, because it is not the one the
+CSV uses. The `?` sentinel is a file-format artifact and it is dealt with at the
+data boundary, not here - see [The `?` sentinel, and where it is dealt
+with](#the--sentinel-and-where-it-is-dealt-with). Over HTTP the column is a
+`double (optional)`, so `130.0` and `"130.0"` both score, `null` means unknown,
+and `"?"` is refused with a 422 like any other value that is not a number:
+
+```
+{"detail":"the model refused this input: Failed to enforce schema of data ...
+ Error: Failed to convert column horsepower from type object to DataType.double."}
+```
 
 ### Wrong input fails; it does not guess
 
@@ -783,8 +879,8 @@ both are read from the model, they keep working when the signature changes.
   that. It no longer needs to: the train step logs the model with `code_paths`,
   so the package travels *inside* the artifact and MLflow puts it on the path
   when it loads. The dependency is the model's, so the model carries it - which
-  is also what lets the managed endpoint, which never sees this repository, load
-  the same artifact.
+  is also what lets any runtime that has never seen this repository - a managed
+  endpoint, someone else's container - load the same artifact.
 - **`.dockerignore`** keeps the rest of the repository - your `.venv`, your
   `mlruns/`, the tests, the notebook - out of the build context entirely.
 
@@ -1294,6 +1390,20 @@ argument is for.
 
 ### Setting the lab up
 
+This is the first section that installs anything with Helm, so it is the section
+that needs Helm - `helm version --short` is the check, and 3 or newer is what
+these charts want:
+
+```bash
+# macOS / Linux
+brew install helm
+# Windows
+winget install Helm.Helm
+# any platform - https://helm.sh/docs/intro/install/
+```
+
+Then the lab itself:
+
 ```bash
 # 0. A cluster, and the images inside it.
 kind create cluster --config k8s/kind-cluster.yaml
@@ -1672,7 +1782,9 @@ is absent from it. Written down, so that nobody mistakes it for the real thing:
   detection.** A failing upstream stays in the rotation.
 - **No telemetry.** Counters at `/_router/status` and a log line per mirrored
   request, held in memory and lost when the pod restarts. No metrics endpoint,
-  and nothing for issue #24's Prometheus to scrape yet.
+  so nothing here for the Prometheus that [the next
+  section](#observability-metrics-one-dashboard-and-an-alert-that-fires)
+  installs to scrape.
 - **It is a single hop, not a data plane.** One Deployment in front of two
   Services. It sees only traffic that comes through the gateway; service-to-service
   calls inside the cluster bypass it entirely, where a sidecar mesh would not.
@@ -2093,7 +2205,8 @@ tests/                 Unit tests, plus one integration test of the refusal path
 charts/                Helm charts: two model versions, and the traffic layer that
                        does blue-green, canary and shadow deployment on top of them.
 notebooks/             The exploratory notebook the course opens with.
-docs/                  The PRD, and the conventions the agents in this repo follow.
+docs/                  The PRD, runbook.html - the local verification checklist -
+                       and the conventions the agents in this repo follow.
 ```
 
 ## Dependencies
@@ -2103,7 +2216,7 @@ no dependency list in `pyproject.toml` that would quietly become one.
 
 | Manifest | Job |
 |---|---|
-| `environments/training.conda.yaml` | The Azure ML environment the four pipeline steps run in on cloud compute. Pins the interpreter as well as the libraries. |
+| `environments/training.conda.yaml` | The environment the four pipeline steps are declared to run in. Conda rather than a requirements file, because it is the one manifest that pins the **interpreter** as well as the libraries. |
 | `environments/serving.requirements.txt` | The runtime of the hand-built serving container: load the model, answer prediction and health requests. |
 | `environments/dev.requirements.txt` | Lint and test this repository, on a laptop and on a pull-request runner. |
 
@@ -2121,26 +2234,6 @@ alignment across manifests, and exactly three manifests.
 
 To change a dependency: edit `environments/dev.requirements.txt`, regenerate the
 lockfile with the command in its header, and commit both.
-
-## Continuous integration - two systems, on purpose
-
-- **`.github/workflows/ci.yml`** is the always-on gate on the *code*. It runs
-  lint, the unit tests, and then the integration test that defends the pipeline's
-  refusal paths, on every pull request, and needs no setup at all: fork the
-  repository, open a pull request, and it runs. This is what gives coursework
-  instant feedback.
-- **`.github/workflows/pipeline.yml`** is the gate on the *model*: the four
-  pipeline steps as four dependent jobs, described under [The pipeline, as a CI
-  workflow](#the-pipeline-as-a-ci-workflow). Same triggers, same absence of
-  setup.
-- **`.pipelines/pr.yml`** is the same gate on the CI platform the module
-  teaches, connected to a student's own organisation and their own fork. It is
-  the artifact to read and extend, and it makes the split between code host and
-  CI platform - two definitions, two systems, one repository - concrete.
-
-Both run `flake8 .` and `pytest`. In the predecessor, the template holding those
-two commands was commented out of the pipeline, so neither ever ran. Here it is
-included.
 
 ## Carried over from the predecessor
 
@@ -2160,6 +2253,14 @@ the parallel batch-scoring path.
 ## Where this is going
 
 `docs/PRD-workstream-0-sdk-v2-rebuild.md` is the plan in full, and the open
-issues are its slices: local training to a signed model artifact, the data
-contract, the quality gate, the serving container, then the cloud pipeline,
-managed endpoint and CI/CD definitions.
+issues are its slices. Everything this document walks you through is built and
+merged: local training to a signed model artifact, the data contract, the
+quality gate, the pipeline and its CI workflows, the serving container, the
+Kubernetes deployment, the three deployment strategies and the observability
+stack.
+
+Read the **Revision 2** banner at the top of that PRD before anything else in
+it. The plan originally specified a rebuild onto a managed cloud ML platform;
+that premise was withdrawn on 21 August 2026, because the course syllabus names
+no cloud provider and every tool it does name runs on a laptop. Sections written
+before that date still carry the old framing, and the banner says which.
