@@ -373,6 +373,12 @@ push to `main`, and by hand from the **Run workflow** button.
 1. Validate the data  ->  2. Train the candidate  ->  3. Apply the quality gate  ->  4. Register
 ```
 
+A hand-started run has a fifth job on the end - `5. Promote` - which waits for a
+person before it does anything. [Triggers, environments and
+secrets](#triggers-environments-and-secrets) below is about that job, about
+which event starts what, and about the retraining schedule this repository
+documents rather than ships.
+
 Four **jobs**, not four steps in one job - which means four runners and four
 empty filesystems. That is the expensive shape, and it was chosen on purpose:
 one job with four `run:` lines would share a disk and make the state problem
@@ -461,6 +467,182 @@ it is running in CI.
 
 No secrets, no accounts, no service connections, no third-party actions. Fork the
 repository, open a pull request, and the pipeline runs.
+
+## Triggers, environments and secrets
+
+Three events start work in this repository, and they do not all do the same
+thing. The difference between the second row and the third is the whole of this
+section.
+
+| Event | Workflow | What runs | Why |
+|---|---|---|---|
+| `pull_request` | `ci.yml`, `pipeline.yml` | lint, unit tests, the integration tests, then jobs 1-4 | The pipeline as a test: does this change still validate, train, clear the gate and register? A proposal is not a promotion, so job 5 is skipped. |
+| `push` to `main` | `ci.yml`, `pipeline.yml` | the same, on the merged result | Main is always known to train. Still no promotion - **merging is not deploying**. |
+| `workflow_dispatch` | `ci.yml`, `pipeline.yml` | the same, inputs overridable, then **5. Promote** | Retraining on demand, the way to watch the gate refuse, and the only trigger here that can promote. |
+
+### Retraining is not a feature
+
+There is no retraining code in this repository, and that is the point. The old
+course published a pipeline object to a platform, kept its id, and poked a REST
+endpoint on a timer to re-trigger it - several hundred lines of Python whose
+entire purpose was to make a training run happen again later.
+
+Retraining *is* your CI re-running the training job. Same four steps, same four
+commands, same quality gate deciding whether the retrained model is allowed to
+exist. If the data has moved and the new model is worse, job 3 exits non-zero and
+nothing is registered - which is the behaviour you wanted from a retraining
+system and did not have to build. All that is left to choose is what starts it.
+
+#### The schedule is yours to add
+
+`pipeline.yml` ships no `schedule:` trigger. Adding one is a single block in its
+`on:` list:
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  # add this
+  schedule:
+    - cron: '17 3 * * 1'          # 03:17 UTC every Monday
+```
+
+You write those two lines; there is nothing to uncomment, and that is on
+purpose - this repository exists because its predecessor's CI quality template
+sat commented out for five years and so lint and tests never ran. A trigger that
+ships disabled is that defect with better intentions.
+
+Then **Actions -> "I understand my workflows, go ahead and enable them"**,
+because a fresh fork ships with every workflow switched off. That is all: job 5
+already names `schedule` in its condition, so an unattended retrain promotes
+through the same approval as a manual one.
+
+It is documented here rather than shipped for three reasons, and none of them is
+that it would not work.
+
+- **The dataset is a frozen 398-row fixture and the split is seeded.** A weekly
+  run would retrain a byte-identical model, forever. It would demonstrate the
+  trigger while quietly teaching that a calendar is a reason to retrain.
+- **Forks have scheduled workflows disabled by default.** The cron would fire
+  only on the upstream repository - the one place nobody is learning from it -
+  and be inert in every fork, which is the only place it would be read.
+- **It would park at job 5's approval every week** and expire unanswered after
+  30 days: a recurring prompt with an audience of one.
+
+Two more things bite once you have enabled it, and neither is a bug: a scheduled
+run only ever uses **the default branch's** copy of the workflow, whichever
+branch you pushed the cron to; and GitHub disables scheduled workflows again
+after 60 days with no commits. A cron that has gone quiet is almost always one of
+those two. The minute is `17` rather than `00` because everybody's cron fires on
+the hour and a job asking for a runner at `:00` queues behind all of them.
+
+#### A calendar is the naive trigger
+
+Worth being explicit about, because the cron is the easy part and the wrong
+lesson is available for free: time is a *proxy*. A weekly retrain fires when
+nothing has changed, and waits six days when everything has.
+
+The triggers a production system actually uses are **drift** in the input
+distribution, **decay** in the live metric, and **enough new labelled data** to
+be worth fitting on. Each of them needs something this repository does not have -
+a served model under real traffic, and ground truth arriving later - so a
+schedule stands in for all three. Substituting it is fine. Not noticing you have
+substituted it is how a team ends up retraining on a calendar and calling it
+MLOps.
+
+### Registration is automatic; promotion is a decision
+
+Job 4 registers. That is a consequence, not an intention - a candidate cleared
+the gate, so a version exists, and "version 7 exists" says nothing about whether
+anyone should serve it. Job 5 moves the `champion` **alias** onto that version,
+and an alias is a name that points at exactly one version:
+
+```console
+# what the serving container resolves once a version has been promoted
+MODEL_URI=models:/automobile-mpg@champion
+```
+
+`serving/loader.py` will load that URI as happily as it loads a directory. So
+job 5 - not the training run, not the registry's version counter - decides what
+gets served. That is why the approval sits in front of *it* and not in front of
+registration, and why `.github/scripts/promote.py` prints which version it
+displaced: a promotion that cannot name its predecessor is a deployment with no
+rollback.
+
+### The approval gate, and the part that does not survive a fork
+
+Job 5 names a deployment environment:
+
+```yaml
+environment:
+  name: production
+```
+
+If that environment carries a **required reviewer**, the job does not start. The
+run shows *Review deployments*, a named person approves or rejects, and only
+then is a runner allocated - so an unapproved promotion never has the
+environment's secrets inside a process at all.
+
+**Protection rules are repository settings, not files.** Nothing in `.github/`
+can carry them, and a fork does not inherit them. Fork this repository and the
+`production` environment is created for you the first time job 5 runs, with no
+rules on it, and promotion sails straight through without pausing. Identical
+YAML, completely different behaviour - which is worth meeting once here, on
+purpose, rather than by surprise in a repository that matters.
+
+So do this once on your fork, under **Settings -> Environments -> New
+environment**, named `production`:
+
+1. Tick **Required reviewers** and add yourself.
+2. Leave **Prevent self-review** unchecked. You are the only reviewer you have;
+   tick it and you have built a gate nobody can open.
+3. Optionally add the environment secret `MLFLOW_TRACKING_URI` - see below, and
+   only if you actually have a tracking server to promote into.
+
+Then start the workflow by hand and watch job 5 sit there. A pending deployment
+waits up to 30 days and is then cancelled; waiting is the feature.
+
+### Secrets, and how to tell one from configuration
+
+The test is not whether a value looks secret-ish. It is:
+
+> If this string were committed here, printed in a log, or inherited by three
+> hundred forks, would anybody have to go and change something?
+
+`MLFLOW_TRACKING_URI` is the example this repository actually has, and it
+answers both ways depending on its value. As `sqlite:///mlflow.db` it is a file
+path: public, reviewable, and correctly checked in. As
+`https://someone:a-token@mlflow.example.com` it is a credential, and committing
+it would be a defect *even if today's value were harmless* - because the file is
+public, the file is forked, the file is in the reflog, and "still harmless" is
+not a property anyone re-checks.
+
+Same variable, same workflow, different answer. So job 5 reads it as a secret
+and falls back to the file when it is unset:
+
+```yaml
+MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI || 'sqlite:///mlflow.db' }}
+```
+
+Unset is the checked-in state and every fork's state, so the fallback is what
+runs, and nobody needs an account to see the pipeline work.
+
+Three places a value can live, and they are not interchangeable:
+
+| Where | What belongs there | What you get |
+|---|---|---|
+| In the workflow file | Configuration everyone may read: the tracking URI's fallback, the dataset default | Public, forked, diffed - and reviewable, which is a feature for a value with no business being hidden |
+| A repository **variable**, `vars.*` | Configuration that differs per fork but is not sensitive - `RETRAIN_DATA`, which is how a scheduled retrain would be pointed at a different dataset once you add one, since a cron trigger cannot be given inputs | Editable without a commit; printed in logs unredacted |
+| A repository or environment **secret**, `secrets.*` | Anything the test above answers "yes" to | Masked in logs; withheld entirely from `pull_request` runs raised from a fork; and, scoped to an environment, unreadable by a job that has not cleared that environment's protection rules |
+
+Job 5 prints *whether* a secret is configured and never its value, because "a
+secret exists" is a fact about the repository's settings while the value is a
+fact about somebody's server. And masking is a safety net, not a permission:
+GitHub replaces a known secret with `***`, but the step holding it can post it
+anywhere, and a value the runner has reshaped - base64'd, sliced, wrapped in
+JSON - is no longer the string being matched and comes out in the clear.
 
 ## The serving container
 
@@ -1506,6 +1688,7 @@ tests/                 Unit tests, plus one integration test of the refusal path
                        behind `-m integration`. No credentials, no network.
 .github/workflows/     GitHub Actions: the always-on quality gate, and the pipeline.
 .github/actions/       One local composite action: Python and the locked environment.
+.github/scripts/       The promotion step - the deployment half, behind the approval.
 .pipelines/            Azure Pipelines: the definitions the course studies.
 charts/                Helm charts: two model versions, and the traffic layer that
                        does blue-green, canary and shadow deployment on top of them.

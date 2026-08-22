@@ -1,4 +1,6 @@
 # The four-step training pipeline: validate -> train -> evaluate -> register.
+# Plus, on demand and behind a human's approval, a fifth job that promotes what
+# the fourth one registered.
 #
 # This is the second of the two CI definitions in this repository. ci.yml is the
 # always-on quality gate for the *code* - lint and unit tests. This one runs the
@@ -59,7 +61,133 @@
 # ---------------------------
 # No credentials, no accounts, no service connections, no third-party actions.
 # Fork this repository, open a pull request, and the pipeline runs. The only
-# configuration is MLFLOW_TRACKING_URI below, and it names a file.
+# configuration is MLFLOW_TRACKING_URI below, and in this repository it names a
+# file.
+#
+# That last clause is the whole of the secrets lesson, so it is worth slowing
+# down for. The *same variable* is configuration when it holds
+# `sqlite:///mlflow.db` and a credential when it holds
+# `https://someone:a-token@mlflow.example.com`. Nothing about the name tells you
+# which; only the value does. So the test for "is this a secret?" is not "does
+# it look secret-ish", it is: if this string were committed here, printed in a
+# log, or inherited by three hundred forks, would anybody have to go and change
+# something? A file path: no. A URI with a token in it: yes, today, everywhere
+# it has already been copied to.
+#
+# Which is why the promote job below reads that one variable from
+# `secrets.MLFLOW_TRACKING_URI` and falls back to the file when it is unset -
+# unset being what every fork starts as, and what this repository is checked in
+# with. A secret written into this file would be a defect *even if today's value
+# were harmless*, because the file is public, the file is forked, the file is in
+# the reflog, and "still harmless" is not a property anyone re-checks.
+#
+# Three places a value can live, and they are not interchangeable:
+#
+#   in this file          Configuration everyone may read: MLFLOW_TRACKING_URI's
+#                         fallback, the dataset default. Public, forked, diffed,
+#                         and reviewable - which is a feature, for a value that
+#                         has no business being hidden.
+#   a repository variable `vars.*` - RETRAIN_DATA below. Configuration that
+#                         differs per fork but is not sensitive. Editable
+#                         without a commit, and printed in logs unredacted.
+#   a repository or       `secrets.*`. Masked in logs, withheld entirely from
+#   environment secret    pull_request runs raised from a fork, and - when it is
+#                         scoped to an *environment* - unreadable by any job
+#                         that has not first passed that environment's approval.
+#
+# Masking is a safety net, not a permission. GitHub replaces a known secret with
+# *** in the log, but the step holding the value can post it anywhere it likes,
+# and a value the runner reshapes - base64, a substring, a JSON blob - is no
+# longer the string being matched and comes out in the clear.
+#
+# Which event starts this workflow, and why
+# -----------------------------------------
+#   pull_request       The pipeline as a test. Does this change still validate,
+#                      still train, still clear the gate, still register? It
+#                      does not promote: a pull request is a proposal.
+#   push to main       The same four steps against the merged result.
+#   workflow_dispatch  Retraining, on demand, with every input overridable -
+#                      including the two that make it fail on purpose. This is
+#                      also the trigger that can promote.
+#
+# Retraining is not a feature, and there is no cron line here
+# ----------------------------------------------------------
+# The framing worth taking away is that this repository contains no retraining
+# machinery at all, because retraining *is* this CI re-running the same training
+# job. The course this replaces published a pipeline object, kept its id, and
+# poked a REST endpoint on a timer to re-trigger it - several hundred lines of
+# Python to make a training run happen again later. What replaces all of it is a
+# trigger, and the four jobs below are unchanged either way.
+#
+# So why is the trigger not in this file? Three reasons, and none of them is
+# that it would not work:
+#
+#   1. The dataset is a frozen 398-row fixture and the split is seeded. A weekly
+#      run would retrain a byte-identical model, forever. It would demonstrate
+#      the trigger while quietly teaching that a calendar is a reason to
+#      retrain, which it is not.
+#   2. A fork has its scheduled workflows disabled until somebody enables them,
+#      so the cron would fire only on the upstream repository - the one place
+#      nobody is learning from it - and be inert in every fork, which is the
+#      only place it would be read.
+#   3. It would park at the promote job's approval every week and expire
+#      unanswered after 30 days: a recurring prompt with an audience of one.
+#
+# Enable it on your own fork by *writing* these two lines into the `on:` block
+# below - there is nothing in this file to uncomment, and that is on purpose. The
+# reason this repository exists is a predecessor whose CI quality template sat
+# commented out for five years, so lint and tests never ran and nobody noticed.
+# A trigger that ships disabled is that defect with better intentions.
+#
+#     schedule:
+#       - cron: '17 3 * * 1'
+#
+# Then Actions -> "I understand my workflows, go ahead and enable them", because
+# a fresh fork ships with all workflows off. Two more things bite, and neither is
+# a bug: a scheduled run only ever uses the *default branch's* copy of this file,
+# whichever branch you pushed the cron to; and GitHub disables scheduled
+# workflows again after 60 days with no commits. A cron that has gone quiet is
+# almost always one of those two. The minute is 17 rather than 00 because
+# everybody's cron fires on the hour and a job asking for a runner at :00 queues
+# behind all of them.
+#
+# And when you do enable it, know what you have built. A calendar is the naive
+# retraining trigger: it retrains when nothing has changed and waits six days
+# when everything has. The real triggers are drift in the input distribution,
+# decay in the live metric, and enough new labelled data to be worth fitting on.
+# Those need a monitored production system to observe, which this repository does
+# not have - so a cron stands in for them, and the substitution should be
+# something you know you are making rather than something you inherit.
+#
+# Promotion is a decision, so it waits for a person
+# -------------------------------------------------
+# `register` is automatic: a candidate that clears the gate becomes a version,
+# and that is a fact about the model rather than an intention about serving.
+# Promotion - moving the `champion` alias, which is what a serving container
+# resolves - is somebody's decision, so the promote job below names a
+# deployment `environment:`, and an environment can carry a required reviewer.
+# The job then does not start; it *waits*, with a "Review deployments" button on
+# the run, and the reviewer approves or rejects. That is the syllabus's
+# « gestion des versions, des environnements et secrets » in one job.
+#
+# Read this part before you assume it protects you
+# ------------------------------------------------
+# **Protection rules do not travel with a fork.** They are repository settings,
+# not files, so nothing in this directory can carry them. Fork this repository
+# and the `production` environment is created for you the first time the job
+# runs - with no rules on it at all - and promotion sails straight through
+# without pausing. The YAML looks identical in both repositories and behaves
+# completely differently, which is exactly the failure mode worth meeting once,
+# deliberately, in a teaching repository rather than by surprise in a real one.
+#
+# So on your own fork, once, by hand (Settings -> Environments -> production):
+#   1. Add yourself under **Required reviewers**.
+#   2. Leave **Prevent self-review** unchecked. You are the only reviewer you
+#      have; tick it and you have built a gate nobody can open.
+#   3. Optionally add the environment secret MLFLOW_TRACKING_URI, if - and only
+#      if - you have a real tracking server to promote into.
+# The README's "Triggers, environments and secrets" section has this with the
+# reasoning attached.
 #
 # Watching it refuse
 # ------------------
@@ -101,8 +229,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: pipeline-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed on the event as well as the ref, and cancelling only pull requests.
+  # A second push to a branch makes the first run's answer worthless, so killing
+  # it saves runners. A dispatched run - or a scheduled one, on a fork that has
+  # enabled the cron - is not worthless in the same way: it may be parked in
+  # front of the promote job's approval, waiting for a person, and having
+  # somebody's unrelated push to main cancel a review they were about to give is
+  # how an approval gate earns a reputation for being flaky. So those runs queue
+  # instead.
+  group: pipeline-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
@@ -119,7 +255,16 @@ env:
   MLFLOW_TRACKING_URI: sqlite:///mlflow.db
   # `inputs` is empty on push and pull_request, so each of these falls back to
   # the value that makes the pipeline the healthy one.
-  DATA: ${{ inputs.data || 'data/auto-mpg.csv' }}
+  #
+  # DATA has a third rung, and it is there for the schedule described in the
+  # header - the one a fork adds for itself. A cron trigger cannot be given
+  # inputs, so a repository variable is the only way to point an unattended
+  # retrain at data other than the seed file. `vars.RETRAIN_DATA` is unset here
+  # and unset on every fork, which is why the literal below is what actually
+  # runs. It is a *variable* rather than a secret because it is a path: it
+  # belongs in the log, and hiding it would only make a failed retrain harder to
+  # explain.
+  DATA: ${{ inputs.data || vars.RETRAIN_DATA || 'data/auto-mpg.csv' }}
   MIN_IMPROVEMENT: ${{ inputs.min_improvement || '0' }}
 
 jobs:
@@ -311,12 +456,126 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish the finished tracking store
-        # The pipeline's output. Nothing downstream consumes it in this
-        # repository - it is here so that a reader of the pull request can pull
-        # the registry onto their laptop and look at what the run produced.
+        # The pipeline's output, and on a pull request that is all it is: a
+        # reader of the pull request can pull the registry onto their laptop and
+        # look at what the run produced. On a dispatched run it is also the
+        # promote job's input, which is why it is uploaded either way.
         uses: actions/upload-artifact@v7
         with:
           name: tracking-store-after-register
+          path: |
+            mlflow.db
+            mlruns/
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+  # ---------------------------------------------------------------------------
+  # Everything below this line is the promotion half: the deployment decision,
+  # the environment that gates it, and the one secret this repository reads.
+  # ---------------------------------------------------------------------------
+  promote:
+    name: 5. Promote the registered version
+    needs: [train, register]
+
+    # Not on a pull request, and not on a push to main either - which is the
+    # point the issue behind this job makes: promotion should be a decision
+    # somebody takes, not a side effect of merging. Merging runs the four steps
+    # and registers a version. Making that version the one a container serves is
+    # a separate act, on a separate trigger, in front of a separate reviewer.
+    #
+    # `schedule` is named here even though this file ships no `schedule:`
+    # trigger. It is a live condition rather than disabled code: a fork that
+    # adds the cron block from the header gets a promoting retrain from that one
+    # addition, instead of discovering afterwards that job 5 silently skipped.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+
+    runs-on: ubuntu-latest
+
+    # The whole gate, in two lines. If the environment carries a required
+    # reviewer, this job does not start: the run shows "Review deployments", the
+    # named reviewer approves or rejects, and only then is a runner allocated -
+    # so an unapproved promotion never has the environment's secrets in a
+    # process at all. If the environment carries no rules (a fresh fork, see the
+    # header), the job runs immediately and the gate is decorative. Both
+    # behaviours come from repository settings that no file here can carry.
+    environment:
+      name: production
+
+    env:
+      # The one value in this repository that could ever legitimately be a
+      # secret, read as one. Unset - the checked-in state, and every fork's
+      # state - the `||` falls through to the SQLite store that travelled with
+      # this run as an artifact, and the promotion happens in the store the
+      # pipeline itself produced. Set to a real tracking server, the same job
+      # promotes there instead and the URI never appears in the log.
+      #
+      # Scoped to the environment rather than the repository on purpose: an
+      # environment secret is readable only by a job that has cleared that
+      # environment's protection rules, so the approval gates the credential and
+      # not merely the step.
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI || 'sqlite:///mlflow.db' }}
+      # Whether the secret exists - which is not the secret, and is safe to
+      # print. `secrets.*` is usable in `env:`, so the comparison happens where
+      # the value is allowed to be rather than in the shell.
+      TRACKING_URI_FROM_SECRET: ${{ secrets.MLFLOW_TRACKING_URI != '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/python-environment
+
+      - name: Restore the tracking store the register job produced
+        uses: actions/download-artifact@v7
+        with:
+          name: tracking-store-after-register
+
+      - name: Say which store this job is about to write to, without saying the secret
+        # A promotion that silently went into the wrong registry is the failure
+        # this repository already guards against in the register step, and the
+        # answer here has an extra half to it: *where the destination came from*.
+        # Note what is printed and what is not. "A secret is configured" is a
+        # fact about the repository's settings; the value is a fact about
+        # somebody's tracking server, and the log is a public artifact.
+        run: |
+          if [ "$TRACKING_URI_FROM_SECRET" = "true" ]; then
+            echo "destination: from the production environment's MLFLOW_TRACKING_URI secret"
+            echo "the value is not printed here, and GitHub would mask it if it were"
+          else
+            echo "destination: sqlite:///mlflow.db - the store this run produced"
+            echo "no MLFLOW_TRACKING_URI secret is configured, which is the fork default"
+          fi
+
+      - name: Move the champion alias onto this run's version
+        # The deployment. `register` decided this version is good enough to
+        # exist; this decides it is the one to serve, and a human decided that
+        # this job may run at all. The script prints which version it replaced,
+        # because a promotion with no stated predecessor is a deployment with no
+        # rollback.
+        run: |
+          python .github/scripts/promote.py \
+            --run-id "${{ needs.train.outputs.run_id }}" | tee promote.log
+
+      - name: Publish what was promoted
+        if: always()
+        run: |
+          {
+            echo "## 5. Promote"
+            echo
+            echo "Run started by \`${{ github.event_name }}\`. This job ran only because the"
+            echo "\`production\` environment let it - immediately if that environment carries"
+            echo "no protection rules, and otherwise once a required reviewer approved it."
+            echo "Who approved is recorded on the run's deployment, not in any context this"
+            echo "step can read, so it is deliberately not claimed here."
+            echo
+            echo '```'
+            cat promote.log || echo '(the step produced no output)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the tracking store with the alias on it
+        uses: actions/upload-artifact@v7
+        with:
+          name: tracking-store-after-promote
           path: |
             mlflow.db
             mlruns/
