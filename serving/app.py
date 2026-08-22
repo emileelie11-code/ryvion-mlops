@@ -1,6 +1,6 @@
 """The HTTP surface of the hand-built serving container.
 
-Four endpoints, and none of them knows anything about automobiles:
+Five endpoints, and none of them knows anything about automobiles:
 
 ``POST /predict``
     Takes records of named columns exactly as the data has them and returns one
@@ -18,6 +18,16 @@ Four endpoints, and none of them knows anything about automobiles:
 ``GET /schema``
     The input contract, read off the artifact. Nothing here is written down by
     hand - the model carries it.
+``GET /metrics``
+    Prometheus exposition. Deliberately a *separate* endpoint from the two
+    health ones, because they answer different questions to different readers:
+    an orchestrator asks a health endpoint "should this replica live, and should
+    it take traffic", and the answer has to be a cheap yes or no it can act on.
+    A monitoring system asks this one "what has been happening", and the answer
+    is a page of numbers that mean nothing without a second scrape to compare
+    them to. Folding either into the other gives the orchestrator something it
+    cannot act on and the monitoring system something it cannot trend.
+    ``serving/metrics.py`` says what is exported and why each one is there.
 
 The service holds one strong opinion, and it is about failure. The model
 pipeline imputes missing values, so a request that omits a column would not
@@ -40,7 +50,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, status
 from mlflow.exceptions import MlflowException
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.responses import Response
 
+from serving import metrics
 from serving.loader import ServedModel, load_model, resolve_model_uri
 
 LOGGER = logging.getLogger("serving")
@@ -67,10 +79,12 @@ async def lifespan(_: FastAPI):
     try:
         _model = load_model(uri)
         _load_failure = None
+        metrics.MODEL_LOADED.set(1)
         LOGGER.info("loaded model from %s", uri)
     except Exception as failure:  # noqa: BLE001 - any load failure is the same failure here
         _model = None
         _load_failure = f"could not load a model from {uri}: {failure}"
+        metrics.MODEL_LOADED.set(0)
         LOGGER.error(_load_failure)
     yield
 
@@ -87,6 +101,15 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Every request through this service is timed and counted, health probes and
+# scrapes included. Nothing is filtered out here on purpose: probe traffic is
+# real traffic, it is the majority of it on an idle cluster, and hiding it in
+# the exporter would mean a dashboard could never tell "quiet" from "the probes
+# stopped too". The `path` label is what separates them, so a panel asks for
+# `path="/predict"` and gets the answer this filter would have forced on
+# everybody.
+app.middleware("http")(metrics.record_request)
 
 
 class PredictionRequest(BaseModel):
@@ -185,6 +208,12 @@ def predict(request: PredictionRequest) -> PredictionResponse:
             detail=f"the model refused this input: {failure}",
         ) from failure
 
+    # Recorded here rather than in the middleware, because the middleware sees a
+    # response body and this sees the numbers. A refused request never reaches
+    # this line, which is what keeps the prediction distribution a distribution
+    # of predictions rather than of attempts.
+    metrics.observe_predictions(predictions)
+
     return PredictionResponse(predictions=predictions)
 
 
@@ -205,3 +234,20 @@ def readyz() -> dict[str, str]:
 def schema() -> dict[str, Any]:
     """The input contract, read off the artifact rather than written down here."""
     return served_model().describe()
+
+
+@app.get(metrics.METRICS_PATH, include_in_schema=False)
+def prometheus_metrics() -> Response:
+    """Prometheus exposition. Answers 200 whether or not a model is loaded.
+
+    That is the opposite of ``/readyz`` and it is deliberate: a replica with no
+    model is exactly the replica whose numbers you want, and a metrics endpoint
+    that went dark when the service was unwell would only ever be up when it was
+    not needed. ``ryvion_serving_model_loaded`` carries the bad news instead, as
+    a value that can be graphed and alerted on.
+
+    It is hidden from the OpenAPI schema because it is not part of the service's
+    contract with a caller - it is the contract with the monitoring system, and
+    Prometheus does not read OpenAPI.
+    """
+    return metrics.exposition()

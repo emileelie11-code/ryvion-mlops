@@ -26,9 +26,25 @@ nodes:
     # work; without it the Service exists and is simply unreachable, which is a
     # confusing first ten minutes for anyone who has only used a managed cluster
     # with a real load balancer in front of it.
+    #
+    # Three ports, because three things want to be reachable from a browser:
+    # the service itself, Prometheus and Grafana. A mapping can only be declared
+    # when the cluster is CREATED - there is no `kind edit cluster` - so a
+    # cluster made before the monitoring section existed has to be recreated to
+    # get the two below. `kubectl port-forward` is the escape hatch if that is
+    # not convenient, and the README gives the commands.
     extraPortMappings:
+      # k8s/service.yaml, and the router's gateway in charts/abtest-router.
       - containerPort: 30080
         hostPort: 30080
+        protocol: TCP
+      # Prometheus - k8s/monitoring/prometheus.yaml.
+      - containerPort: 30090
+        hostPort: 30090
+        protocol: TCP
+      # Grafana - k8s/monitoring/grafana.yaml.
+      - containerPort: 30030
+        hostPort: 30030
         protocol: TCP
   - role: worker
   - role: worker

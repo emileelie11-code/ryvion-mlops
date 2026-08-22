@@ -1,0 +1,498 @@
+# Everything Grafana is told before it starts, as three ConfigMaps.
+#
+# Nothing here is clicked. A dashboard built in the browser lives in Grafana's
+# own SQLite database, and this stack's database is an emptyDir that dies with
+# the pod - so a dashboard built that way is gone by the next lab and cannot be
+# reviewed in a pull request. Provisioning is the fix: Grafana reads these files
+# at startup, and the dashboard is a file in this repository like any other.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        # The uid is fixed rather than generated, because the dashboard JSON
+        # refers to it by uid. Leave it out and Grafana invents one, the
+        # dashboard's panels point at a datasource that does not exist, and
+        # every panel reads "Datasource ${DS_PROMETHEUS} was not found".
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          # Told to Grafana so that its "$__rate_interval" arithmetic knows the
+          # smallest window a rate() can honestly be asked for.
+          timeInterval: 15s
+          httpMethod: POST
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: ryvion
+        orgId: 1
+        folder: Ryvion
+        type: file
+        # A provisioned dashboard cannot be saved over from the UI, which is the
+        # point: the file in this repository stays the source of truth. Explore
+        # freely, then write the change down here.
+        disableDeletion: false
+        allowUiUpdates: false
+        options:
+          path: /etc/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: monitoring
+data:
+  # One dashboard, two halves, one screen.
+  #
+  # The top half is what any web service would want: how much traffic, how much
+  # of it failed, how long it took. The bottom half is what a MODEL needs and a
+  # web service has no equivalent of: what it is actually predicting, and
+  # whether that has moved.
+  #
+  # They are on one screen deliberately. The lesson the layout is making is that
+  # the two halves fail independently - the drift lab drives the bottom half out
+  # of its band while every panel in the top half stays green, and that
+  # juxtaposition is the whole argument for model monitoring.
+  ryvion-serving.json: |
+    {
+      "uid": "ryvion-serving",
+      "title": "Ryvion serving - health and predictions",
+      "tags": ["ryvion", "mlops"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "refresh": "10s",
+      "time": { "from": "now-30m", "to": "now" },
+      "templating": { "list": [] },
+      "annotations": { "list": [] },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Service health - what any web service would watch",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "type": "stat",
+          "title": "Replicas with a model loaded",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(ryvion_serving_model_loaded)",
+              "legendFormat": "loaded",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "green", "value": 1 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "colorMode": "background",
+            "graphMode": "none",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Requests/sec on /predict",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(ryvion_serving_requests_total{path=\"/predict\"}[2m]))",
+              "legendFormat": "req/s",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "text", "value": null }]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "colorMode": "none",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Error rate on /predict",
+          "description": "The same series the PredictErrorRateHigh alert reads. It fires above 20%.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "ryvion:predict_errors:ratio2m",
+              "legendFormat": "4xx+5xx",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 0.05 },
+                  { "color": "red", "value": 0.2 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "colorMode": "background",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "title": "p95 latency on /predict",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(ryvion_serving_request_duration_seconds_bucket{path=\"/predict\"}[2m])))",
+              "legendFormat": "p95",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 3,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "orange", "value": 0.25 },
+                  { "color": "red", "value": 1 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+            "colorMode": "background",
+            "graphMode": "area",
+            "textMode": "auto",
+            "justifyMode": "auto"
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Request rate by route and status",
+          "description": "Probe traffic is in here too, by design - /healthz going quiet is a signal, and a filter in the exporter would have hidden it.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (path, status) (rate(ryvion_serving_requests_total[2m]))",
+              "legendFormat": "{{path}} {{status}}",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "stacking": { "mode": "none", "group": "A" }
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean"], "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency on /predict",
+          "description": "Quantiles from the histogram's buckets, which is the only way to aggregate a percentile across replicas correctly.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(ryvion_serving_request_duration_seconds_bucket{path=\"/predict\"}[2m])))",
+              "legendFormat": "p50",
+              "range": true
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.9, sum by (le) (rate(ryvion_serving_request_duration_seconds_bucket{path=\"/predict\"}[2m])))",
+              "legendFormat": "p90",
+              "range": true
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(ryvion_serving_request_duration_seconds_bucket{path=\"/predict\"}[2m])))",
+              "legendFormat": "p99",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "type": "row",
+          "title": "Prediction behaviour - what a model needs and a web service has no equivalent of",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+          "collapsed": false,
+          "panels": []
+        },
+        {
+          "type": "timeseries",
+          "title": "Predictions per second",
+          "description": "Records scored, not requests handled. One request may carry a batch.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "ryvion:predictions:rate2m",
+              "legendFormat": "predictions/s",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 20,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+            "tooltip": { "mode": "single", "sort": "none" }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Predicted mpg - p10 / p50 / p90, and the band the alert watches",
+          "description": "PredictionDistributionShifted fires when p50 leaves [15, 32] for a minute. The dashed lines are that band, so the alert is legible on the graph rather than only in a rules file.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 16, "x": 8, "y": 14 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "ryvion:prediction_mpg:p10",
+              "legendFormat": "p10",
+              "range": true
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "ryvion:prediction_mpg:p50",
+              "legendFormat": "p50",
+              "range": true
+            },
+            {
+              "refId": "C",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "ryvion:prediction_mpg:p90",
+              "legendFormat": "p90",
+              "range": true
+            },
+            {
+              "refId": "D",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "vector(15)",
+              "legendFormat": "alert band low",
+              "range": true
+            },
+            {
+              "refId": "E",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "vector(32)",
+              "legendFormat": "alert band high",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 1,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byRegexp", "options": "alert band.*" },
+                "properties": [
+                  { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
+                  { "id": "custom.lineWidth", "value": 1 },
+                  { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        },
+        {
+          "type": "heatmap",
+          "title": "Prediction distribution - the shape, not the summary",
+          "description": "Every bucket of ryvion_serving_prediction_mpg over time. Two models with the same median can have entirely different shapes here, which is why the quantiles above are not the whole answer.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 22 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (le) (rate(ryvion_serving_prediction_mpg_bucket[2m]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "range": true
+            }
+          ],
+          "fieldConfig": { "defaults": { "custom": { "hideFrom": {} } }, "overrides": [] },
+          "options": {
+            "calculate": false,
+            "cellGap": 1,
+            "color": {
+              "mode": "scheme",
+              "scheme": "Oranges",
+              "steps": 64,
+              "reverse": false,
+              "exponent": 0.5,
+              "fill": "dark-orange"
+            },
+            "filterValues": { "le": 1e-9 },
+            "legend": { "show": true },
+            "rowsFrame": { "layout": "auto", "value": "predictions/s" },
+            "tooltip": { "mode": "single", "showColorScale": false, "yHistogram": false },
+            "yAxis": { "axisPlacement": "left", "reverse": false, "unit": "short", "axisLabel": "predicted mpg" }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Alerts Prometheus is evaluating",
+          "description": "The ALERTS series Prometheus writes about itself: 1 while an alert is pending or firing. There is no Alertmanager in this stack - see the README on why, and on what that means for routing.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 31 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "ALERTS",
+              "legendFormat": "{{alertname}} - {{alertstate}} ({{signal}})",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "max": 1,
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "stepAfter",
+                "lineWidth": 2,
+                "fillOpacity": 30,
+                "showPoints": "never"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "right", "calcs": [], "showLegend": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          }
+        }
+      ]
+    }

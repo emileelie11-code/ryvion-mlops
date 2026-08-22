@@ -25,3 +25,12 @@ mlflow==3.4.0
 # The HTTP surface.
 fastapi==0.128.0
 uvicorn==0.38.0
+
+# The monitoring surface: the client that builds `GET /metrics`. It is already
+# in this image transitively - mlflow pulls it in through pydocket - and it is
+# written down here anyway, because `serving/metrics.py` imports it directly and
+# a direct import
+# resting on somebody else's transitive dependency is exactly how a build breaks
+# on a day nobody touched it. Pinned to the version the lockfile already
+# resolved, so the serving image and the test environment agree.
+prometheus-client==0.26.0

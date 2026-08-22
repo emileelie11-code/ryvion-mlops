@@ -1,0 +1,220 @@
+# Prometheus's configuration and its rules, in one ConfigMap mounted whole at
+# /etc/prometheus.
+#
+# There are two files in here and they do different jobs. `prometheus.yml` says
+# what to scrape and how often. `rules.yaml` says what to compute from what was
+# scraped, and what is bad enough to be called an alert.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      # 15s is the interval every rate() window in the dashboards and rules is
+      # sized against. The rule of thumb is that a rate window must span at
+      # least four scrape intervals to survive a missed scrape, which is why
+      # nothing below asks for a window shorter than 1m.
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: ryvion
+
+    rule_files:
+      - /etc/prometheus/rules.yaml
+
+    scrape_configs:
+      # Prometheus scrapes itself. Not vanity: it is how you tell "the service
+      # stopped producing data" from "Prometheus stopped collecting it", and
+      # those two look identical on every other panel.
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      # --- The one job that finds the serving container -------------------
+      #
+      # This is the "without manual wiring" part, and it is worth being precise
+      # about what it does. Prometheus asks the API server for EVERY pod in the
+      # cluster - there is no namespace filter and no service name anywhere in
+      # this file - and then the relabel rules below decide which of them to
+      # keep and where to scrape them.
+      #
+      # relabel_configs run BEFORE the scrape, on the discovered target's
+      # metadata. That is what makes them able to change the address and the
+      # path, and it is the distinction from metric_relabel_configs, which run
+      # after and can only touch what came back.
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+
+        relabel_configs:
+          # 1. Keep only pods that asked to be scraped. Everything else in the
+          #    cluster - CoreDNS, the kube-proxies, Grafana - is dropped here,
+          #    which is why this stack costs so little: it stores the series one
+          #    workload declared, not every series the cluster could produce.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+
+          # 2. Scrape the path the pod named, defaulting to /metrics.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+
+          # 3. Scrape the port the pod named. __address__ arrives as the pod IP
+          #    with the first declared container port on it, which is very often
+          #    not the one the metrics are on, so it is rewritten rather than
+          #    trusted.
+          - source_labels:
+              [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+          # 4. Carry the pod's own labels through, so that a dashboard can say
+          #    `app_kubernetes_io_name="ryvion-serving"` and mean it. Kubernetes
+          #    label names contain characters Prometheus does not allow in a
+          #    label, so labelmap rewrites the dots and slashes to underscores.
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+
+          # 5. And the identity of the thing that produced the numbers. Without
+          #    these, five replicas are five indistinguishable series and
+          #    "which pod is slow" has no answer.
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+
+  rules.yaml: |
+    groups:
+      # --- Recording rules ---------------------------------------------------
+      #
+      # A recording rule evaluates an expression on a schedule and stores the
+      # result as a new series. Two reasons to have them here. The cheap one:
+      # a histogram_quantile over a 2-minute rate is the most expensive thing
+      # on the dashboard and it is on three panels, so computing it once every
+      # 15s beats computing it on every refresh of every browser tab.
+      #
+      # The one that matters: the alert below and the dashboard panel next to it
+      # now read THE SAME SERIES. When they are two copies of the same
+      # expression they drift, and the first anybody hears of it is a dashboard
+      # that looks fine while an alert is firing.
+      #
+      # The naming convention is Prometheus's own: level:metric:operation.
+      - name: ryvion-serving-recording
+        interval: 15s
+        rules:
+          - record: ryvion:prediction_mpg:p50
+            expr: >-
+              histogram_quantile(0.5,
+                sum by (le) (rate(ryvion_serving_prediction_mpg_bucket[2m])))
+          - record: ryvion:prediction_mpg:p10
+            expr: >-
+              histogram_quantile(0.1,
+                sum by (le) (rate(ryvion_serving_prediction_mpg_bucket[2m])))
+          - record: ryvion:prediction_mpg:p90
+            expr: >-
+              histogram_quantile(0.9,
+                sum by (le) (rate(ryvion_serving_prediction_mpg_bucket[2m])))
+          - record: ryvion:predictions:rate2m
+            expr: sum(rate(ryvion_serving_predictions_total[2m]))
+          # Two defensive pieces here, and both of them are lessons.
+          #
+          # `or vector(0)`: with no errors at all, the numerator's selector
+          # matches nothing and returns an EMPTY vector - not zero. An empty
+          # numerator makes the whole division empty, so a service behaving
+          # perfectly produces no series at all and the dashboard panel reads
+          # "No data", which is indistinguishable from the exporter being down.
+          # This is the single most common way a PromQL ratio misleads.
+          #
+          # `clamp_min`: with no traffic the denominator is zero, and x/0 in
+          # PromQL is +Inf rather than an error. An alert on a ratio would fire
+          # the moment the last caller went home.
+          - record: ryvion:predict_errors:ratio2m
+            expr: >-
+              (sum(rate(ryvion_serving_requests_total{path="/predict",status=~"4..|5.."}[2m]))
+               or vector(0))
+              /
+              clamp_min(sum(rate(ryvion_serving_requests_total{path="/predict"}[2m])), 1e-9)
+
+      # --- Alerting rules ----------------------------------------------------
+      - name: ryvion-serving-alerts
+        interval: 15s
+        rules:
+          # THE MODEL ALERT. This is the one that is not available to an
+          # ordinary web service, and the one to demonstrate.
+          #
+          # The model was trained on cars whose fuel economy runs from about 9
+          # to 47 mpg, and on any realistic mix of traffic the median prediction
+          # sits in the low-to-mid twenties. A median that has walked outside
+          # [15, 32] does not mean the service is broken - latency is fine,
+          # nothing is returning 500 - it means the model is being asked about a
+          # population it was not trained on, or has been replaced by one that
+          # answers differently. That is the failure mode nothing else here can
+          # see, and it is the failure mode that reaches production most often.
+          #
+          # The second clause is a guard rather than a condition: with no
+          # traffic the quantile is NaN and would never fire anyway, but writing
+          # the guard down says that this alert is about what the model is
+          # saying, not about whether anyone is asking.
+          #
+          # Trigger it on demand by sending heavy eight-cylinder cars - the
+          # README has the loop.
+          - alert: PredictionDistributionShifted
+            expr: >-
+              (ryvion:prediction_mpg:p50 < 15 or ryvion:prediction_mpg:p50 > 32)
+              and ryvion:predictions:rate2m > 0
+            for: 1m
+            labels:
+              severity: warning
+              signal: model
+            annotations:
+              summary: "Median prediction has left the band the model was validated on"
+              description: >-
+                The median predicted value over the last two minutes is
+                {{ $value | printf "%.1f" }} mpg, outside [15, 32]. The service
+                is healthy; what changed is what it is saying. Check what is
+                being sent to it before you check the model.
+
+          # The ordinary service alert, for contrast. Both are on the same
+          # dashboard for the same reason they are in the same file: the point
+          # of the section is that these two signals fail independently.
+          - alert: PredictErrorRateHigh
+            expr: ryvion:predict_errors:ratio2m > 0.2
+            for: 1m
+            labels:
+              severity: warning
+              signal: service
+            annotations:
+              summary: "More than a fifth of /predict calls are being refused"
+              description: >-
+                {{ $value | humanizePercentage }} of requests to /predict
+                returned 4xx or 5xx over the last two minutes. A refusal is the
+                service working as designed, so this is usually a caller sending
+                the wrong shape - and occasionally a model whose signature moved.
+
+          # No model loaded is a readiness problem, and Kubernetes already keeps
+          # traffic away from a replica in that state. It is here because the
+          # orchestrator's answer is invisible outside the cluster, and this one
+          # is not.
+          - alert: ServingModelNotLoaded
+            expr: min(ryvion_serving_model_loaded) == 0
+            for: 2m
+            labels:
+              severity: critical
+              signal: service
+            annotations:
+              summary: "A serving replica is up with no model loaded"
+              description: >-
+                At least one replica is answering /healthz and failing /readyz.
+                It is out of the Service and still running - `kubectl logs` it
+                rather than restarting it.

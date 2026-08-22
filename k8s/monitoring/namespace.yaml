@@ -1,0 +1,12 @@
+# One namespace for the monitoring stack, so that `kubectl delete ns monitoring`
+# takes all of it back in one command and the lab can be run twice.
+#
+# It also keeps the RBAC honest: Prometheus needs to read pods across the WHOLE
+# cluster, which is a ClusterRole, and having its ServiceAccount live somewhere
+# other than `default` makes the binding say out loud who was given that.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: ryvion-mlops

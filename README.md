@@ -32,6 +32,16 @@ Two later sections need more, and neither of them needs a cloud account either:
   cluster as Docker containers, so the orchestration half of the course is also
   a laptop exercise. See [the same container, on
   Kubernetes](#the-same-container-on-kubernetes).
+- **8 GB of RAM**, and it is a real floor rather than a polite minimum. The
+  heaviest configuration the course asks for is the three-node cluster with the
+  serving container, the metrics API and the monitoring stack on it, and that is
+  **about 2.4 GB resident** with everything running - on top of the container
+  engine, a browser and an editor. Every number behind that is measured and
+  tabulated under [the memory
+  decision](#the-memory-decision-the-operator-bundle-or-two-deployments). The
+  single most effective thing you can do about it is delete your cluster when
+  you stop working; a forgotten one from last week is the usual reason the
+  monitoring section does not fit.
 
 ## Quickstart - from a fresh clone to a green test run
 
@@ -785,9 +795,11 @@ k8s/
   service.yaml                 One stable address in front of N replicas.
   hpa.yaml                     Replicas follow CPU.
   metrics-server/              What the HPA needs, and does not get for free.
+  monitoring/                  Prometheus and Grafana - see Observability, below.
   labs/readiness-failure.yaml  Out of service, still running.
   labs/liveness-failure.yaml   Restarted.
   labs/loadgen.yaml            Something to scale in response to.
+  labs/traffic.yaml            Three fleets of real cars, and the alert lab.
 ```
 
 > **Delete the cluster when you stop working.** It does not stop on its own, it
@@ -801,10 +813,11 @@ k8s/
 > kind get clusters                   # "No kind clusters found."
 > ```
 >
-> This is not tidiness. A later section of the course adds a monitoring stack to
-> the same cluster, and on a 8 GB laptop a forgotten cluster from last week is
-> the difference between that working and that swapping. Read [Teardown](#teardown)
-> now rather than when you get to it.
+> This is not tidiness. [A later section of the
+> course](#observability-metrics-one-dashboard-and-an-alert-that-fires) adds a
+> monitoring stack to the same cluster, and on a 8 GB laptop a forgotten cluster
+> from last week is the difference between that working and that swapping. Read
+> [Teardown](#teardown) now rather than when you get to it.
 
 ### What you need
 
@@ -1153,10 +1166,11 @@ The built image stays in your local Docker daemon, which is usually what you
 want between sessions. `docker rmi ryvion-mlops-serving:local` reclaims its
 1.4 GB when you are finished with it for good.
 
-Why this section is emphatic: a later part of the course installs Prometheus and
-Grafana onto this same cluster, and that is the memory ceiling of the whole
-module on a 8 GB laptop. A cluster left running from a previous session is the
-usual reason it does not fit.
+Why this section is emphatic: [the next part of the
+course](#observability-metrics-one-dashboard-and-an-alert-that-fires) installs
+Prometheus and Grafana onto this same cluster, and that is the memory ceiling of
+the whole module on a 8 GB laptop. A cluster left running from a previous session
+is the usual reason it does not fit.
 
 ## Deployment strategies: blue-green, canary and shadow
 
@@ -1546,8 +1560,9 @@ so. A mesh is affordable here; that is the honest finding and it is worth
 recording, because the decision below does not rest on it.
 
 The router is **18 MiB**. That is the comparison that survives: not 1 GB against
-20 MB, but 390 MiB against 18 MiB, twenty times cheaper, on the machine where a
-later section of this course adds Prometheus and Grafana to the same cluster.
+20 MB, but 390 MiB against 18 MiB, twenty times cheaper, on the machine where
+[the next section](#observability-metrics-one-dashboard-and-an-alert-that-fires)
+adds Prometheus and Grafana to the same cluster.
 Alongside that:
 
 - Istio is three more Helm releases, about thirty CRDs and roughly 600 MB of
@@ -1674,13 +1689,384 @@ If you installed Istio and want the cluster back without it,
 `kubectl label namespace abtesting istio-injection-` and restart the model
 deployments to shed the sidecars. Deleting the cluster is faster.
 
+## Observability: metrics, one dashboard, and an alert that fires
+
+Everything up to here answers "is it up". Probes restart a wedged process, a
+readiness check routes around a replica with no model, and an autoscaler adds
+capacity. None of them can see the failure that actually reaches production
+most often, which is a model that is **up, fast, returning 200, and wrong**.
+
+That is what this section is about, and it is why the instrumentation exports
+four things rather than three. Request rate, latency and error rate are what any
+web service watches. The fourth - the **distribution of what the model
+predicted** - is what makes this model monitoring, and it is the only signal here
+that moves when a model goes wrong without breaking.
+
+### What the service exports
+
+`GET /metrics`, on the same port as everything else and deliberately a separate
+endpoint from `/healthz` and `/readyz`. The two answer different questions to
+different readers: an orchestrator needs a cheap yes-or-no it can act on, and a
+monitoring system needs a page of numbers that mean nothing without a second
+scrape to compare them against.
+
+| Series | Type | Answers |
+|---|---|---|
+| `ryvion_serving_requests_total{method,path,status}` | counter | Request rate, **and** error rate - a ratio of one selection of this counter to all of it. |
+| `ryvion_serving_request_duration_seconds` | histogram | Latency *distribution*. `histogram_quantile()` gives p50/p95/p99; a mean would hide the tail, which is the only part anybody notices. |
+| `ryvion_serving_predictions_total` | counter | Records scored. Not the same as requests - one request may carry a batch. |
+| `ryvion_serving_prediction_mpg` | histogram | **What the model actually said.** The signal an ordinary service has no equivalent of. |
+| `ryvion_serving_model_loaded` | gauge | `/readyz` in a form a graph and an alert rule can read. |
+
+`serving/metrics.py` says why each one is the instrument it is. Two decisions in
+it are worth pulling out:
+
+- **The `path` label is the matched route template, never the raw URL.** A
+  service that labelled by raw path mints a new time series for every distinct
+  URL anyone requests, so a scanner probing for `/wp-admin` a thousand times is a
+  thousand series - and the bill lands on the monitoring system rather than on
+  the service. Anything unmatched is labelled `unmatched` and stays one series.
+- **Health-probe traffic is counted, not filtered out.** It is the majority of
+  traffic on an idle cluster, and hiding it in the exporter would mean a
+  dashboard could never tell "quiet" from "the probes stopped too". The `path`
+  label is what separates them, so a panel asks for `path="/predict"`.
+
+Try it against the container alone, before any cluster is involved:
+
+```bash
+docker run --rm -d --name ryvion-metrics -p 8000:8000 ryvion-mlops-serving:local
+# Give it a moment - unpickling the model takes a few seconds. /readyz says when.
+until curl -sf localhost:8000/readyz >/dev/null; do sleep 1; done
+
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' \
+  -d '{"records":[{"cylinders":8,"displacement":307.0,"horsepower":"130.0",
+       "weight":3504,"acceleration":12.0,"model year":70,"origin":1,
+       "car name":"chevrolet chevelle malibu"}]}'
+curl -s localhost:8000/metrics | grep ryvion_serving_prediction_mpg_bucket
+docker rm -f ryvion-metrics
+```
+
+```
+ryvion_serving_prediction_mpg_bucket{le="10.0"} 0.0
+ryvion_serving_prediction_mpg_bucket{le="12.5"} 0.0
+ryvion_serving_prediction_mpg_bucket{le="15.0"} 1.0
+ryvion_serving_prediction_mpg_bucket{le="17.5"} 1.0
+...
+ryvion_serving_prediction_mpg_bucket{le="+Inf"} 1.0
+```
+
+One prediction of 14.98 mpg, landing in the `(12.5, 15.0]` bucket. That single
+line is the whole idea: the service has recorded *what it said*, not only that
+it said something.
+
+### Standing the stack up
+
+```bash
+# 0. A cluster with the serving container in it - the two sections above, in
+#    full. Recreate the cluster if it predates this section: the Prometheus and
+#    Grafana ports are extraPortMappings, and those can only be set at creation.
+kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+kubectl rollout status deploy/ryvion-serving
+
+# 1. The monitoring stack. One command; nothing to configure.
+kubectl apply -k k8s/monitoring
+kubectl -n monitoring rollout status deploy/prometheus
+kubectl -n monitoring rollout status deploy/grafana
+
+# 2. Prometheus found the service by itself. This is the check that it did.
+curl -s 'localhost:30090/api/v1/targets?state=active' | python -c "
+import json, sys
+for t in json.load(sys.stdin)['data']['activeTargets']:
+    print(t['labels']['job'], t['scrapeUrl'], t['health'], t['labels'].get('pod', ''))"
+```
+
+```
+kubernetes-pods http://10.244.2.2:8000/metrics up ryvion-serving-9b5d45675-bsj62
+prometheus http://localhost:9090/metrics up
+```
+
+Then open **Grafana on <http://localhost:30030>** - anonymous access is on, so
+there is no login between you and the dashboard - and **Prometheus on
+<http://localhost:30090>** for the raw queries and the rule states.
+
+#### "Without manual wiring" is three annotations, and it is worth knowing why
+
+Nothing in `k8s/monitoring/` names the serving Service, its namespace or its
+pod IP. Prometheus has one job that asks the API server for **every** pod in the
+cluster and keeps the ones that carry these, from `k8s/deployment.yaml`:
+
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: /metrics
+  prometheus.io/port: "8000"
+```
+
+So a workload declares that it is scrapeable on its own manifest, and the
+monitoring side needs no edit when it scales, moves node, or gets a new pod IP.
+The `relabel_configs` that implement this are commented line by line in
+`k8s/monitoring/prometheus-config.yaml`, and the distinction worth taking away is
+that `relabel_configs` run **before** the scrape, on the discovered target - which
+is how they can rewrite the address and the path - while `metric_relabel_configs`
+run after and can only touch what came back.
+
+The alternative, and the reason this repository does not install the Prometheus
+Operator, is a `ServiceMonitor`: a custom resource, so a CRD, an operator to
+watch it, and a controller to generate the configuration those three lines
+replace. See [the memory decision](#the-memory-decision-the-operator-bundle-or-two-deployments)
+below for what that costs here.
+
+### The dashboard
+
+One dashboard, `k8s/monitoring/grafana-config.yaml`, provisioned from a file
+rather than clicked together in the browser. A dashboard built in the UI lives in
+Grafana's own database - which in this stack is an `emptyDir` that dies with the
+pod - so it would be gone by the next lab and could never appear in a pull
+request.
+
+Two halves, one screen, and the layout is the argument:
+
+- **Service health** - replicas with a model loaded, requests/sec, error rate,
+  p95 latency, request rate by route and status, and latency quantiles.
+- **Prediction behaviour** - predictions/sec, the p10/p50/p90 of the predicted
+  value with the alert's band drawn on it as dashed lines, and a heatmap of every
+  bucket of the prediction histogram over time.
+
+The heatmap is the one to project. Two models with the same median can have
+completely different shapes, and the quantile lines above it cannot show that.
+
+The last panel is the `ALERTS` series Prometheus writes about itself, so the
+alert below is legible on the same screen as the thing that caused it.
+
+### Making it say something, then something bad
+
+`k8s/labs/traffic.yaml` is one Deployment and one environment variable with three
+values. All three send **real rows of `data/auto-mpg.csv`**; the lab is not built
+on invented data.
+
+```bash
+kubectl apply -f k8s/labs/traffic.yaml
+# FLEET=mixed - a spread of the real dataset. The p50 line settles around 23 mpg,
+# in the middle of the band, and every alert stays inactive.
+```
+
+Now change nothing but the population being asked about:
+
+```bash
+kubectl set env deploy/ryvion-traffic FLEET=heavy
+```
+
+`heavy` is the eight-cylinder end of the same file - 4300-pound V8s, every record
+real, not one of them malformed. Watch the two halves of the dashboard disagree.
+After about three minutes (two for the rate window to fill with the new
+population, one for the rule's `for:`):
+
+```bash
+curl -s localhost:30090/api/v1/alerts | python -m json.tool
+```
+
+```json
+{
+  "labels": {
+    "alertname": "PredictionDistributionShifted",
+    "severity": "warning",
+    "signal": "model"
+  },
+  "annotations": {
+    "description": "The median predicted value over the last two minutes is 11.7 mpg, outside [15, 32]. The service is healthy; what changed is what it is saying. Check what is being sent to it before you check the model.",
+    "summary": "Median prediction has left the band the model was validated on"
+  },
+  "state": "firing",
+  "activeAt": "2026-08-22T07:02:43.97268139Z",
+  "value": "1.1656661502711076e+01"
+}
+```
+
+And this is what every other signal said at that same moment:
+
+```
+error rate on /predict           0
+p95 latency on /predict          0.0059 s
+successful requests per second   4.85
+ryvion_serving_model_loaded      1
+```
+
+**Nothing is broken.** No probe failed, no request was refused, latency is six
+milliseconds. The service is being asked about a population it was not trained
+for, and the only place that is visible is the shape of what it says. That is the
+entire argument for model monitoring, in one environment variable.
+
+The alert is `pending` for the whole of its `for: 1m` and only then `firing` -
+watch it cross over in `curl -s localhost:30090/api/v1/rules`. That delay is not
+latency to be tuned away; it is what stops one scrape's worth of noise paging
+anybody.
+
+For the contrast, break it in the ordinary way:
+
+```bash
+kubectl set env deploy/ryvion-traffic FLEET=malformed
+```
+
+The same records with a required column removed. The service refuses them with
+422 - the behaviour the serving section is emphatic about, because imputing the
+missing column would have returned a wrong number with a 200 - the error-rate
+panel climbs past 90%, the prediction panels go flat because nothing is being
+predicted, and `PredictErrorRateHigh` fires instead:
+
+```
+"summary": "More than a fifth of /predict calls are being refused",
+"description": "80.04% of requests to /predict returned 4xx or 5xx over the last
+                two minutes. A refusal is the service working as designed, so
+                this is usually a caller sending the wrong shape - and
+                occasionally a model whose signature moved."
+```
+
+Two failures, two alerts, two entirely different pictures. Set `FLEET=mixed`
+again and watch both resolve on their own as the bad traffic ages out of the
+two-minute window - `PredictionDistributionShifted` clears within one scrape of
+the p50 returning to 23 mpg, and `PredictErrorRateHigh` decays through 69%, 46%,
+24% and then goes inactive.
+
+```bash
+kubectl set env deploy/ryvion-traffic FLEET=mixed    # back to normal
+kubectl delete -f k8s/labs/traffic.yaml
+```
+
+#### There is no Alertmanager, and that is a real omission
+
+Prometheus evaluates rules and knows perfectly well that an alert is firing -
+that is what `/api/v1/alerts`, the `ALERTS` series and the dashboard panel are
+reading. What it does not do is **route** that anywhere: deduplicating,
+grouping, silencing and delivering to email, Slack or a pager is Alertmanager's
+job, and it is a second process this stack does not run.
+
+For a laptop lab where the alert is the thing being demonstrated, that costs
+nothing and saves a component. In production it is not optional, and the shape of
+what is missing is worth saying out loud rather than leaving as a surprise.
+
+### The memory decision: the operator bundle, or two Deployments
+
+**This is the memory ceiling of the whole module**, so it is a measurement rather
+than a preference. The syllabus names *Prometheus, Grafana*. It does not name the
+Prometheus Operator - and the usual way to install those two on Kubernetes,
+`kube-prometheus-stack`, brings the operator, Alertmanager, node-exporter,
+kube-state-metrics and around a hundred default alerting rules along with them.
+
+Both were installed, each on **its own freshly created three-node kind cluster**,
+on the same 8 GB laptop (`7.611GiB` as Docker reports it), and measured with
+`docker stats --no-stream` against the three node containers.
+
+Two fresh clusters rather than one cluster twice, and that turned out to matter:
+after `helm uninstall`, the nodes were still holding **2676 MiB** against a
+1819 MiB starting point. Page cache and a grown API server do not hand memory
+back on uninstall, so an install-measure-uninstall-install-measure sequence would
+have charged the second stack for the first one's residue.
+
+| Cluster state | control-plane | worker | worker2 | total | delta |
+|---|---|---|---|---|---|
+| **Cluster A** - fresh, nothing deployed | 700.3 MiB | 149.9 MiB | 154.5 MiB | **1005 MiB** | - |
+| + metrics-server, the serving container | 969.3 MiB | 456.6 MiB | 632.7 MiB | **2059 MiB** | +1054 MiB |
+| + `k8s/monitoring` (Prometheus + Grafana) | 947.8 MiB | 680.2 MiB | 689.3 MiB | **2317 MiB** | **+259 MiB** |
+| … and with the traffic lab running | 969.6 MiB | 695.5 MiB | 712.7 MiB | **2378 MiB** | +61 MiB |
+| **Cluster B** - fresh, nothing deployed | 594.3 MiB | 127.6 MiB | 127.9 MiB | **850 MiB** | - |
+| + metrics-server, the serving container | 853.3 MiB | 561.7 MiB | 404.3 MiB | **1819 MiB** | +969 MiB |
+| + `kube-prometheus-stack` 88.5.3, default values | 1153.0 MiB | 1169.4 MiB | 689.9 MiB | **3012 MiB** | **+1193 MiB** |
+
+The two baselines differ by about 150 MiB for reasons that have nothing to do
+with monitoring - which node the scheduler picked, how much of the 1.4 GB
+serving image is still in page cache after `kind load`. That is exactly why the
+column that matters is **delta**, and the deltas are not close: **259 MiB
+against 1193 MiB, four and a half times.**
+
+Per pod, from `kubectl top pods -A`:
+
+| | `k8s/monitoring` | `kube-prometheus-stack` |
+|---|---|---|
+| Prometheus | 31 Mi | 177 Mi |
+| Grafana | 143 Mi | 422 Mi (three containers: Grafana and two sidecars) |
+| Alertmanager | - | 26 Mi |
+| Prometheus Operator | - | 24 Mi |
+| kube-state-metrics | - | 17 Mi |
+| node-exporter | - | 8 Mi + 8 Mi + 7 Mi (one per node) |
+| **kube-apiserver**, same cluster | **242 Mi** | **459 Mi** |
+
+That last row is the cost nobody budgets for. The operator watches ten new custom
+resource kinds, and the stack's Prometheus scrapes 28 targets including the
+kubelets and the API server itself, so the API server's own footprint roughly
+doubles. It is not in the monitoring namespace and it does not appear in any
+chart's resource requests.
+
+**Both fit on an 8 GB laptop, and that is the honest finding** - a plan for this
+slice assumed the operator bundle would not, and the measurement says otherwise.
+3.0 GB leaves room for a browser and an editor. But it fits with nothing spare,
+on a machine that is also running the container engine underneath the cluster,
+and it buys nothing this course is here to teach:
+
+- **The annotation convention does not work with it.** With default values,
+  `kube-prometheus-stack` never scraped the serving container at all - 28 active
+  targets, none of them `ryvion-serving`, because the operator's Prometheus is
+  configured entirely from `ServiceMonitor` and `PodMonitor` resources and
+  ignores `prometheus.io/scrape`. Getting the one workload this course exists to
+  monitor onto the dashboard means learning a CRD first.
+- **41,095 active series against 858.** Forty-eight times the storage and the
+  query cost, for a cluster whose interesting workload is one Deployment.
+- **155 alerting rules and 94 recording rules, in 35 groups**, none of which are
+  about this model. Finding the one alert that matters in that list is a worse
+  first lesson in alerting than writing it.
+- **115 Kubernetes objects and 10 CRDs**, against 12 objects and no CRDs. And
+  `helm uninstall` leaves all ten CRDs behind - deleting them is a separate
+  manual step, which is worth knowing before you meet it on a cluster you care
+  about.
+
+So `k8s/monitoring` is what this course installs, and it is twelve objects of
+plain YAML that a student can read in ten minutes. `kube-prometheus-stack` is
+the right answer on a cluster with a platform team behind it, and the commands
+are here for anyone who wants to see it:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm install kps prometheus-community/kube-prometheus-stack \
+  --version 88.5.3 -n monitoring --create-namespace
+# and to get the serving container into it, a PodMonitor - the CRD the three
+# annotations in k8s/deployment.yaml replace.
+```
+
+Note the one result nobody expects: **Grafana is the expensive half of the plain
+stack, not Prometheus.** Prometheus holding 858 series is around 31 MiB; Grafana
+with one dashboard is around 143 MiB, and rose to 172 MiB with the dashboard open
+in a browser. If you go looking for savings, look there first.
+
+Measured with `docker` 29.6.1, `kind` 0.32.0 and Kubernetes v1.36.1. The absolute
+numbers will drift with those versions; the ratio is the part that will not.
+
+### Teardown
+
+The same command and the same trap as every other cluster in this course. The
+monitoring namespace goes with it:
+
+```bash
+kind delete cluster --name ryvion
+kind get clusters
+# No kind clusters found.
+```
+
+Run the second command. `kind delete cluster` without `--name` deletes a cluster
+called `kind`, reports success, and leaves `ryvion` running.
+
+To take only the monitoring stack back and leave the cluster:
+
+```bash
+kubectl delete -k k8s/monitoring
+```
+
 ## Repository layout
 
 ```
 automobile/            The domain package.
   entrypoints/         One argparse shell per pipeline step. No domain logic.
-serving/               The hand-built serving application and its Dockerfile.
-k8s/                   Plain Kubernetes manifests, and the probe/autoscaling labs.
+serving/               The hand-built serving application, its metrics, and its Dockerfile.
+k8s/                   Plain Kubernetes manifests, the monitoring stack, and the labs
+                       for probes, autoscaling and prediction drift.
 data/                  The seed dataset, committed. 398 rows, six of them defective,
                        plus a deliberately corrupt copy for the contract to refuse.
 environments/          The three dependency manifests, and the lockfile.

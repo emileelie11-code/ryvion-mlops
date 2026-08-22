@@ -1,0 +1,164 @@
+# Grafana: the screen. One Deployment, one Service, no database worth keeping.
+#
+# It is deliberately the lighter half of this stack. Prometheus stores and
+# evaluates; Grafana only queries and draws, so it holds no series, needs no
+# retention window and is roughly a third of the memory.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: ryvion-mlops
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/part-of: ryvion-mlops
+      annotations:
+        prometheus.io/scrape: "false"
+      # Provisioning is read at startup only. Editing a dashboard ConfigMap and
+      # applying it does not reload Grafana - the kubelet updates the mounted
+      # file within a minute or so and Grafana's file provider rescans on its
+      # own schedule, so `kubectl rollout restart deploy/grafana -n monitoring`
+      # is the reliable way to see a change.
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # The uid the upstream image uses. As with Prometheus, fsGroup is what
+        # makes the emptyDir below writable by it.
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: grafana
+          image: grafana/grafana:13.1.4
+          imagePullPolicy: IfNotPresent
+          env:
+            # Anonymous access, Viewer role. This is a lab on a laptop and the
+            # dashboard is meant to be projected: a login screen between an
+            # audience and the point is friction with no security value on a
+            # cluster that has no network path to it. Admin still needs the
+            # password below, and neither of these belongs on anything reachable.
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+            # Off, because this cluster has no internet egress worth spending
+            # and a version-check request that times out slows every page load.
+            - name: GF_ANALYTICS_REPORTING_ENABLED
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+            - name: GF_NEWS_NEWS_FEED_ENABLED
+              value: "false"
+            # Land on the dashboard rather than on the welcome page, so that
+            # `open http://localhost:30030` is the whole demo.
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /etc/grafana/dashboards/ryvion-serving.json
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: dashboards
+              mountPath: /etc/grafana/dashboards
+              readOnly: true
+            # Grafana insists on a writable data directory for its SQLite
+            # database even when nothing in this stack writes to it, and the
+            # root filesystem is read-only. This is that directory, and it is an
+            # emptyDir precisely because nothing in it is worth keeping: the
+            # dashboard comes from a ConfigMap on every start.
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          # Measured: around 75 MiB resident with this one dashboard open.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+        - name: data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: ryvion-mlops
+spec:
+  # NodePort 30030, published to the laptop by k8s/kind-cluster.yaml.
+  # `kubectl port-forward -n monitoring svc/grafana 3000:3000` is the fallback
+  # on a cluster created before that mapping existed.
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      nodePort: 30030
+      protocol: TCP

@@ -1,0 +1,52 @@
+# What Prometheus is allowed to do, and why it needs to be allowed anything.
+#
+# Prometheus does not have a list of things to scrape. It has a list of ways to
+# FIND things to scrape, and on Kubernetes that means asking the API server
+# "which pods exist right now, and what annotations do they carry". That is a
+# read of the cluster's own state, so it needs credentials, and the credentials
+# are a ServiceAccount with a ClusterRole bound to it.
+#
+# The role below is read-only and it is the smallest set that pod discovery
+# actually uses. It is worth reading rather than copying, because "install
+# monitoring" is one of the most common ways a cluster acquires a component with
+# cluster-wide read access without anybody noticing that it did.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ryvion-prometheus
+rules:
+  # Discovery. `pods` is the one this repository's scrape config uses; nodes,
+  # services and endpoints are the other discovery roles Prometheus supports and
+  # are listed so that a student who adds a `role: service` job does not have to
+  # debug an RBAC failure to find out it was missing.
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  # Scraping the kubelet's own /metrics goes through the API server's proxy
+  # rather than the resource API, so it is a non-resource URL and needs its own
+  # rule. Nothing in k8s/monitoring scrapes it today - it is here because
+  # removing it is the kind of edit that fails silently a month later.
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ryvion-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ryvion-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring

@@ -1,0 +1,222 @@
+# Lab: make the monitoring stack say something, then make it say something bad.
+#
+# One Deployment, one environment variable, three fleets. The whole lab is
+# changing that variable and watching two different alerts fire for two
+# different reasons - which is the point, because the two failures look nothing
+# alike on the dashboard.
+#
+#     kubectl apply -f k8s/labs/traffic.yaml
+#     # http://localhost:30030 - the p50 line settles in the middle of the band
+#
+#     kubectl set env deploy/ryvion-traffic FLEET=heavy
+#     # p50 walks below 15 and stays there. Latency, error rate and readiness do
+#     # not move at all. After a minute, PredictionDistributionShifted fires.
+#
+#     kubectl set env deploy/ryvion-traffic FLEET=malformed
+#     # now the OTHER half of the dashboard moves: error rate to 100%, and the
+#     # prediction panels go flat because nothing is being predicted.
+#
+#     kubectl set env deploy/ryvion-traffic FLEET=mixed     # back to normal
+#     kubectl delete -f k8s/labs/traffic.yaml               # done
+#
+# Watch the alerts move through their states, which is worth seeing once:
+#
+#     curl -s localhost:30090/api/v1/alerts | python -m json.tool
+#
+# An alert is `pending` for the whole of its `for:` duration and only then
+# `firing`. That delay is not latency to be tuned away - it is what stops a
+# single scrape's worth of noise paging anybody, and it is why every alert in
+# k8s/monitoring/prometheus-config.yaml has one.
+#
+# Like k8s/labs/loadgen.yaml, this runs the serving image because it is already
+# on the nodes and a kind cluster may have no route to a registry. The script is
+# standard library only.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ryvion-traffic
+  labels:
+    lab: traffic
+data:
+  traffic.py: |
+    """Send one of three fleets of cars at the service, forever.
+
+    `mixed` is a sample of the real dataset, spread across the twelve model
+    years and all three origins, so the distribution of predictions it produces
+    is roughly the distribution the model was validated against. This is what
+    "normal" looks like on the dashboard.
+
+    `heavy` is the eight-cylinder end of the same dataset and nothing else. Every
+    record in it is real; not one of them is malformed; the service will answer
+    all of them with a 200 in single-digit milliseconds. What changes is the
+    ANSWER - a fleet of 4300-pound V8s is predicted at ten to fourteen mpg, the
+    median prediction leaves the band the model was validated on, and
+    PredictionDistributionShifted fires while every other signal stays green.
+
+    That is the entire argument for model monitoring in one environment
+    variable. Nothing is broken. The service is being asked about a population
+    it was not trained for, and the only place that is visible is the shape of
+    what it says.
+
+    `malformed` drops a required column, which the service refuses with a 422 -
+    the ordinary failure, for contrast, on the ordinary half of the dashboard.
+    """
+    import json
+    import os
+    import random
+    import time
+    import urllib.error
+    import urllib.request
+
+    TARGET = os.environ.get("TARGET", "http://ryvion-serving/predict")
+    FLEET = os.environ.get("FLEET", "mixed")
+    BATCH = int(os.environ.get("BATCH", "5"))
+    DELAY = float(os.environ.get("DELAY", "0.2"))
+
+    COLUMNS = (
+        "cylinders",
+        "displacement",
+        "horsepower",
+        "weight",
+        "acceleration",
+        "model year",
+        "origin",
+        "car name",
+    )
+
+    # Real rows of data/auto-mpg.csv, horsepower left as the string the file has
+    # it as - the model's signature declares it that way and the pipeline coerces
+    # it, which is exactly the property this repository refuses to duplicate in
+    # the service.
+    MIXED = [
+        (8, 307.0, "130.0", 3504, 12.0, 70, 1, "chevrolet chevelle malibu"),
+        (4, 110.0, "87.00", 2672, 17.5, 70, 2, "peugeot 504"),
+        (4, 140.0, "90.00", 2408, 19.5, 72, 1, "chevrolet vega"),
+        (4, 122.0, "86.00", 2395, 16.0, 72, 1, "ford pinto (sw)"),
+        (6, 250.0, "88.00", 3021, 16.5, 73, 1, "ford maverick"),
+        (4, 121.0, "112.0", 2868, 15.5, 73, 2, "volvo 144ea"),
+        (6, 231.0, "110.0", 3907, 21.0, 75, 1, "buick century"),
+        (4, 121.0, "115.0", 2671, 13.5, 75, 2, "saab 99le"),
+        (4, 85.00, "70.00", 1945, 16.8, 77, 3, "datsun f-10 hatchback"),
+        (4, 97.00, "78.00", 2190, 14.1, 77, 2, "volkswagen dasher"),
+        (6, 225.0, "110.0", 3620, 18.7, 78, 1, "dodge aspen"),
+        (6, 231.0, "115.0", 3245, 15.4, 79, 1, "pontiac lemans v6"),
+        (4, 119.0, "92.00", 2434, 15.0, 80, 3, "datsun 510 hatchback"),
+        (4, 156.0, "92.00", 2620, 14.4, 81, 1, "dodge aries wagon (sw)"),
+        (6, 145.0, "76.00", 3160, 19.6, 81, 2, "volvo diesel"),
+        (4, 120.0, "88.00", 2160, 14.5, 82, 3, "nissan stanza xe"),
+    ]
+
+    HEAVY = [
+        (8, 429.0, "198.0", 4341, 10.0, 70, 1, "ford galaxie 500"),
+        (8, 454.0, "220.0", 4354, 9.0, 70, 1, "chevrolet impala"),
+        (8, 440.0, "215.0", 4312, 8.5, 70, 1, "plymouth fury iii"),
+        (8, 351.0, "153.0", 4154, 13.5, 71, 1, "ford galaxie 500"),
+        (8, 304.0, "150.0", 4257, 15.5, 74, 1, "amc matador (sw)"),
+        (8, 350.0, "165.0", 3693, 11.5, 70, 1, "buick skylark 320"),
+    ]
+
+
+    def record(row):
+        return dict(zip(COLUMNS, row))
+
+
+    def batch():
+        if FLEET == "heavy":
+            rows = [record(random.choice(HEAVY)) for _ in range(BATCH)]
+        elif FLEET == "malformed":
+            rows = [record(random.choice(MIXED)) for _ in range(BATCH)]
+            for row in rows:
+                # A required column, quietly absent. The pipeline would impute it
+                # and answer 200 with a wrong number, which is why the service
+                # refuses it instead - see serving/app.py.
+                row.pop("weight", None)
+        else:
+            rows = [record(random.choice(MIXED)) for _ in range(BATCH)]
+        return json.dumps({"records": rows}).encode()
+
+
+    while True:
+        request = urllib.request.Request(
+            TARGET, data=batch(), headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response.read()
+        except urllib.error.HTTPError as refusal:
+            # Expected in the `malformed` fleet, and the point of it. Read the
+            # body so the connection can be reused rather than reset.
+            refusal.read()
+        except (urllib.error.URLError, OSError, TimeoutError):
+            pass
+        time.sleep(DELAY)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ryvion-traffic
+  labels:
+    lab: traffic
+spec:
+  # One replica and a deliberate sleep between requests. This lab is about the
+  # SHAPE of what comes back, not the volume: driving enough CPU to wake the
+  # HorizontalPodAutoscaler would add replicas mid-demonstration and change the
+  # thing being measured. k8s/labs/loadgen.yaml is the one that exists to do
+  # that, and running both at once is a good way to confuse both lessons.
+  replicas: 1
+  selector:
+    matchLabels:
+      lab: traffic
+  template:
+    metadata:
+      labels:
+        lab: traffic
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: traffic
+          image: ryvion-mlops-serving:local
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/etc/traffic/traffic.py"]
+          env:
+            - name: TARGET
+              value: http://ryvion-serving/predict
+            # mixed | heavy | malformed. `kubectl set env deploy/ryvion-traffic
+            # FLEET=heavy` rolls a new pod with the new value, which takes a few
+            # seconds and is visible on the request-rate panel as a small gap.
+            - name: FLEET
+              value: mixed
+            - name: BATCH
+              value: "5"
+            - name: DELAY
+              value: "0.2"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: script
+              mountPath: /etc/traffic
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi
+      volumes:
+        - name: script
+          configMap:
+            name: ryvion-traffic
+        - name: tmp
+          emptyDir: {}

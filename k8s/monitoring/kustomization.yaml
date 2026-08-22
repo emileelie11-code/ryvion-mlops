@@ -1,0 +1,29 @@
+# The monitoring stack, in one command:
+#
+#     kubectl apply -k k8s/monitoring
+#
+# Plain YAML and a kustomization that does nothing but order the files, for the
+# same reason the rest of k8s/ is plain YAML: this is the layer worth being able
+# to read. The Helm alternative is real and is discussed in the README - it is
+# `kube-prometheus-stack`, it brings the Prometheus Operator, Alertmanager,
+# node-exporter and kube-state-metrics with it, and the README carries the
+# measurement of what that costs on the machine this course is taught on.
+#
+# Order matters here in exactly one way: the Namespace has to exist before
+# anything in it. Kustomize sorts by kind and puts Namespace first, so the list
+# below is in reading order rather than in apply order.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - prometheus-rbac.yaml
+  - prometheus-config.yaml
+  - prometheus.yaml
+  - grafana-config.yaml
+  - grafana.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: ryvion-mlops

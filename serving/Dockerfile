@@ -76,7 +76,7 @@ WORKDIR /app
 
 # The application. Owned by root and read-only to the account that runs it:
 # nothing in this service ever writes to disk.
-COPY serving/__init__.py serving/loader.py serving/app.py /app/serving/
+COPY serving/__init__.py serving/loader.py serving/metrics.py serving/app.py /app/serving/
 
 # The exported MLflow model directory. It is a build input, not something
 # committed to the repository, so a build without it fails here - deliberately,

@@ -37,6 +37,29 @@ spec:
       labels:
         app.kubernetes.io/name: ryvion-serving
         app.kubernetes.io/part-of: ryvion-mlops
+
+      # This is the whole of the wiring between this Deployment and Prometheus,
+      # and it is worth understanding why it is three annotations rather than a
+      # line of Prometheus configuration.
+      #
+      # Prometheus in k8s/monitoring is configured with ONE pod-discovery job.
+      # It asks the API server for every pod in the cluster and then keeps the
+      # ones carrying `prometheus.io/scrape: "true"`, reading the path and port
+      # off the other two. So a workload declares that it is scrapeable, on its
+      # own manifest, next to the port it says it listens on - and nothing has
+      # to be edited on the monitoring side when a new one appears, or when this
+      # one scales, moves node or gets a new pod IP.
+      #
+      # The alternative, and the reason this repository does not install the
+      # Prometheus Operator, is a ServiceMonitor: a custom resource, and
+      # therefore a CRD, an operator to watch it and a controller to write the
+      # configuration this file's three lines replace. The convention below is
+      # older, is what the operator's own documentation calls the "annotation
+      # based" approach, and costs nothing.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8000"
     spec:
       # Spread replicas across nodes where possible. ScheduleAnyway rather than
       # DoNotSchedule: on a two-node laptop cluster a hard constraint would leave
