@@ -759,6 +759,19 @@ both are read from the model, they keep working when the signature changes.
   of the base image. `--only-binary=:all:` fails the build rather than compiling
   anything from source, which is what keeps the image buildable on both x86 and
   Apple Silicon without a toolchain inside it.
+- **Not the training environment.** The manifest pins `mlflow-skinny`, not
+  `mlflow`, and that one word is **1.43 GB → 830 MB** on disk and 316 MB → 184 MB
+  to pull. The full distribution is the whole platform - a tracking server
+  (Flask, Gunicorn, SQLAlchemy, Alembic, GraphQL), the comparison UI (matplotlib,
+  Pillow, fontTools), an in-memory columnar engine (pyarrow alone is 145 MB) and
+  a job runner (pydocket, Redis) - 82 packages that a scoring service loads at
+  startup and then never calls. What it does call still works, and that was
+  measured rather than assumed: all 398 rows of the seed dataset score to
+  **bit-identical** float64 values under both distributions, the six with a
+  missing `horsepower` included, and every 422 comes back with the same message.
+  Loading the artifact does now log a warning that `pyarrow` is missing, because
+  MLflow records the requirements of the environment that *trained* the model;
+  the scoring path never touches it.
 - **No preprocessing.** The service loads a complete scikit-learn pipeline
   through its MLflow flavour and hands it a raw row. If you ever find a
   `to_numeric` or a `fillna` in `serving/`, the skew this repository exists to
@@ -1164,7 +1177,7 @@ not.
 
 The built image stays in your local Docker daemon, which is usually what you
 want between sessions. `docker rmi ryvion-mlops-serving:local` reclaims its
-1.4 GB when you are finished with it for good.
+830 MB when you are finished with it for good.
 
 Why this section is emphatic: [the next part of the
 course](#observability-metrics-one-dashboard-and-an-alert-that-fires) installs
@@ -1973,8 +1986,9 @@ have charged the second stack for the first one's residue.
 | + `kube-prometheus-stack` 88.5.3, default values | 1153.0 MiB | 1169.4 MiB | 689.9 MiB | **3012 MiB** | **+1193 MiB** |
 
 The two baselines differ by about 150 MiB for reasons that have nothing to do
-with monitoring - which node the scheduler picked, how much of the 1.4 GB
-serving image is still in page cache after `kind load`. That is exactly why the
+with monitoring - which node the scheduler picked, how much of the serving
+image is still in page cache after `kind load` (1.4 GB of it at the time these
+numbers were taken; 830 MB since). That is exactly why the
 column that matters is **delta**, and the deltas are not close: **259 MiB
 against 1193 MiB, four and a half times.**
 

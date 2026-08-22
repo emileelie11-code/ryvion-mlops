@@ -451,7 +451,7 @@ python -m automobile.entrypoints.validate --data $env:TEMP\broken.csv</pre>
       <div class="num">11</div>
       <div class="step-body">
         <h3>Build and start it</h3>
-        <p>Build from the repo root, not from <code>serving/</code> — the Dockerfile needs the requirements manifest that lives above it. First build takes a few minutes; it is ~1.4&nbsp;GB.</p>
+        <p>Build from the repo root, not from <code>serving/</code> — the Dockerfile needs the requirements manifest that lives above it. First build takes a few minutes; it is ~830&nbsp;MB, down from 1.43&nbsp;GB since slice #19 swapped full MLflow for <code>mlflow-skinny</code>.</p>
 <pre class="cmd">docker build -f serving/Dockerfile -t ryvion-mlops-serving:local .
 docker run -d --name ryvion --rm -p 8000:8000 ryvion-mlops-serving:local
 docker ps</pre>
@@ -513,7 +513,7 @@ Remove-Item -Recurse serving\model, mlruns</pre>
           <tr><td>Managed online endpoint</td><td class="mono">not built</td><td>Slice #9. Needs a workspace.</td></tr>
           <tr><td>CI/CD pipeline definitions</td><td class="mono">not built</td><td>Slice #10. Needs an Azure DevOps organisation.</td></tr>
           <tr><td>Apple Silicon</td><td class="mono">unverified</td><td>Issue #20. The image was proven under emulation only; nobody has run it on an M-series Mac.</td></tr>
-          <tr><td>Image size</td><td class="mono">known issue</td><td>Issue #19. 1.4&nbsp;GB, because the serving manifest pins full MLflow.</td></tr>
+          <tr><td>Image size</td><td class="mono">done</td><td>Issue #19. 1.43&nbsp;GB → 830&nbsp;MB: the serving manifest pins <code>mlflow-skinny</code>, which drops the tracking server, the plotting stack and pyarrow. All 398 seed rows score to bit-identical values under both.</td></tr>
         </tbody>
       </table>
     </div>
@@ -530,6 +530,7 @@ Remove-Item -Recurse serving\model, mlruns</pre>
       <li><strong><code>curl</code> rejects <code>-X</code> or <code>-d</code></strong> — PowerShell's alias. Use <code>curl.exe</code>.</li>
       <li><strong>Port 8000 already in use</strong> — <code>docker rm -f ryvion</code>, or map a different port with <code>-p 8001:8000</code>.</li>
       <li><strong><code>readyz</code> returns 503</strong> — the container is up but no model loaded. You most likely skipped step 10, or built before exporting the model.</li>
+      <li><strong>A startup warning about <code>pyarrow (current: uninstalled, required: pyarrow==21.0.0)</code></strong> — expected, and not a fault. MLflow records the requirements of the environment that <em>trained</em> the model, and that environment had pyarrow in it; the scoring path never calls it, which is why the serving image drops it (145&nbsp;MB of the saving). The container is healthy and the predictions are unchanged — <code>/readyz</code> is the thing to believe.</li>
     </ul>
   </section>
 

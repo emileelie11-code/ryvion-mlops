@@ -20,17 +20,51 @@
 numpy==2.2.6
 pandas==2.3.3
 scikit-learn==1.7.2
-mlflow==3.4.0
+
+# `mlflow-skinny`, not `mlflow`, and the difference is 600 MB of image.
+#
+# The full distribution is the whole platform: a tracking *server* (Flask,
+# Gunicorn, SQLAlchemy, Alembic, GraphQL), the artifact-comparison UI
+# (matplotlib, Pillow, fontTools), an in-memory columnar engine (pyarrow, 145 MB
+# on its own) and a background job runner (pydocket, Redis, fakeredis). This
+# service runs none of that. It loads one artifact from a directory at startup
+# and calls `predict` - and `mlflow-skinny` is the same `mlflow` package with the
+# server, the UI and the storage back ends left out, published by the MLflow
+# project for exactly this case.
+#
+# What survives the cut is what this service actually uses, and it was checked
+# rather than assumed: `mlflow.pyfunc.load_model` on the sklearn flavour, the
+# signature read by `GET /schema`, and MLflow's schema enforcement - which is the
+# thing that turns a malformed record into a 422 instead of a confident wrong
+# number. All 398 rows of the seed dataset score to bit-identical float64 values
+# under both distributions, the six rows with a missing `horsepower` included.
+#
+# One cosmetic consequence, and it is not a fault: the artifact's own
+# requirements list `pyarrow`, because MLflow infers requirements from the
+# environment that trained the model, so loading it logs a mismatch warning about
+# a package the scoring path never calls. See the runbook.
+mlflow-skinny==3.4.0
 
 # The HTTP surface.
 fastapi==0.128.0
 uvicorn==0.38.0
 
-# The monitoring surface: the client that builds `GET /metrics`. It is already
-# in this image transitively - mlflow pulls it in through pydocket - and it is
-# written down here anyway, because `serving/metrics.py` imports it directly and
-# a direct import
+# The monitoring surface: the client that builds `GET /metrics`. Written down
+# here because `serving/metrics.py` imports it directly, and a direct import
 # resting on somebody else's transitive dependency is exactly how a build breaks
-# on a day nobody touched it. Pinned to the version the lockfile already
-# resolved, so the serving image and the test environment agree.
+# on a day nobody touched it. That was written when full MLflow still dragged it
+# in through pydocket and this line was belt and braces; slimming the image took
+# pydocket out, and this line is now the only reason the module imports at all.
+# Pinned to the version the lockfile already resolved, so the serving image and
+# the test environment agree.
 prometheus-client==0.26.0
+
+# Not imported by anything here. It is a transitive dependency - google-auth,
+# under databricks-sdk, under MLflow - and it is pinned because the full
+# distribution capped it at `<46` and the slim one does not, so dropping the
+# fat pin would have floated a cryptography library five major versions in a
+# change whose subject is image size. That is a bump to take deliberately, in
+# its own change, with its own reason; this one declines it. The version is the
+# one `environments/dev.lock.txt` already resolved, so the image and the test
+# environment still agree.
+cryptography==45.0.7
