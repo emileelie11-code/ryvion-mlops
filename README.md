@@ -2264,3 +2264,5 @@ it. The plan originally specified a rebuild onto a managed cloud ML platform;
 that premise was withdrawn on 21 August 2026, because the course syllabus names
 no cloud provider and every tool it does name runs on a laptop. Sections written
 before that date still carry the old framing, and the banner says which.
+
+Fork de travail - Prenom Nom, EFREI 2027.
