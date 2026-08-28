@@ -2266,3 +2266,5 @@ no cloud provider and every tool it does name runs on a laptop. Sections written
 before that date still carry the old framing, and the banner says which.
 
 Fork de travail - Prenom Nom, EFREI 2027.
+
+contre-epreuve
