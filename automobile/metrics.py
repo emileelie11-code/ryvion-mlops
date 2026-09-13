@@ -10,6 +10,8 @@ therefore survives changing one.
 """
 
 from typing import Any
+import os
+CHEMIN = "un chemin volontairement beaucoup trop long pour la limite de cent caracteres fixee par le depot"
 
 import numpy as np
 import pandas as pd
