@@ -1,5 +1,7 @@
 # ryvion-mlops
 
+<!-- retest 2026-09-13 : ligne de controle LAB1 -->
+
 The worked example for a 35-hour graduate MLOps module: a regression that
 predicts an automobile's fuel economy in miles per gallon, taken from raw data
 to a served prediction, with the operational machinery around it visible rather
