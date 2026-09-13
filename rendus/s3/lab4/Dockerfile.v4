@@ -1,0 +1,12 @@
+FROM python@sha256:528257d48c1da0dcecc2e725d1ae34498d60c965f1241e39cd6a85a8859bdf84 AS builder
+COPY labs/slim/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --prefix=/opt/install -r /tmp/requirements.txt
+
+FROM python@sha256:528257d48c1da0dcecc2e725d1ae34498d60c965f1241e39cd6a85a8859bdf84
+COPY --from=builder /opt/install /usr/local
+RUN useradd --create-home --uid 10001 ryvion
+WORKDIR /app
+COPY --chown=ryvion:ryvion labs/slim/service.py /app/service.py
+USER ryvion
+EXPOSE 8000
+CMD ["python", "service.py"]
